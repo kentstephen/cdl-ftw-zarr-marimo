@@ -39,11 +39,17 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   reads to deck as an update and it keeps its loaded tiles). The TMS must carry
   a `boundingBox` (morecantile's stock WebMercatorQuad lacks one); the TMS-less
   path in lonboard 0.16 is dead code (`getTileData` returns null).
-- **The lighting patch is REQUIRED**: lonboard's tile mesh fragment shader calls
+- **The lonboard JS patch is REQUIRED** (`tools/patch_lonboard_raster_unlit.py`,
+  two replacements; re-run after any install, never `--sandbox`; then restart
+  the kernel: anywidget reads the JS into the Map's `_esm` when the Map is
+  created, a browser reload changes nothing): (1) the tile mesh fragment shader calls
   `lighting_getLightColor`, ~0.69x on every channel, `opacity` ignored, no
-  Python prop reaches it. `tools/patch_lonboard_raster_unlit.py` replaces the
-  line; re-run after any install; hard-reload the browser. Without it the
-  colours are wrong (a protan-safe palette drawn dark).
+  Python prop reaches it; without it the colours are wrong (a protan-safe
+  palette drawn dark). (2) `getTileData` gives the kernel TEN SECONDS per tile
+  request (`timeout:1e4`); past that the JS drops the tile and deck never asks
+  again, so a batch over 10 s (a fly-to into a cold region) left the map blank
+  until a param change rebuilt the layer (2026-08-21, Champaign). Raised to
+  120 s. Keep batches short anyway: the status line's ms is the number.
 
 ## Things that cost a round trip (keep)
 
@@ -66,12 +72,30 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   replacement scan does not see cell locals); every trait assignment from a
   worker thread goes through `loop.call_soon_threadsafe`; an anywidget's CSS
   classes must be prefixed (marimo's Tailwind owns `.hidden`).
-- The FTW modes (clip, disagreement) are decided PER TILE ZOOM (`_ftw_zoom_ok`:
-  the view box at that zoom under FTW_BOX_DEG2, i.e. tile z >= 12 at CONUS
-  latitudes), never per batch box: the first batch of a view is the whole
-  view, a pan's batch is two tiles, and the cache key does not record the
-  decision, so a per-batch test mixed clipped and unclipped tiles in one view
-  (2026-08-21, "just the fields, sometimes everything, some tiles").
+- The FTW modes (clip, disagreement) work at EVERY zoom: the mask picks the
+  coarsest pyramid level within 4/3 of the CDL pixel served (`FTW_LEVELS` 4,
+  16, 64, 256 = 40 m .. 2.56 km; all share the origin and 512-px chunks). The
+  old 0.35 deg^2 cap ("zoom in for FTW") is gone: it was first applied per
+  batch (the whole-view first batch off, a pan's small batch on, one cache key,
+  so a view mixed clipped and unclipped tiles), then per tile zoom, and even
+  then deck's placeholder tiles (refinementStrategy best-available, not
+  exposed by lonboard) flashed the unclipped low-zoom tiles while panning.
+- The batch future always resolves (`_run_batch` try/except, CancelledError
+  included): a batch neither closed nor resolved would collect every later
+  request of its zoom forever. Nothing else is speculative on the serve: the
+  data lands in ~0.5 s anywhere in CONUS (cold Champaign CDL read measured),
+  so no retry, no heal, no timeouts (a day's worth of those was removed).
+- The search runs IN THE CELL RUN, like a toggle: Photon synchronously, camera,
+  `HOLD["layer_state"] = None` so the layer is rebuilt in the same run. As a
+  background task after the run (fly_to, sleep, rebuild) the frontend never
+  got the layer ("Model not found for key", empty map until a toggle).
+- A layer is always a NEW `RasterLayer` (`_make_raster` / `_rebuild`): under
+  marimo a layer removed from `deck.layers` is closed; re-adding the same
+  object draws nothing. `_make_raster` takes `_fetch` / `_render` from HOLD:
+  it sits above them in the cell and marimo drops underscore temporaries a
+  forward reference does not keep ("NameError: _cell_..._fetch").
+- Outlines only from tile z12 (`OUTLINE_ZMIN`): a z5 outline tile holds a
+  state's every field; with the clip at every zoom the outlines must not be.
 - With fields ON, disagreement's orange class (CDL crop, no FTW field) cannot
   appear (the clip is the same grid); the legend says so.
 

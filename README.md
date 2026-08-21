@@ -26,9 +26,12 @@ uv run python tools/patch_lonboard_raster_unlit.py   # once per install, see bel
 uv run marimo edit cdl-ftw.py
 ```
 
-`tools/patch_lonboard_raster_unlit.py` turns off deck's default lighting on
+`tools/patch_lonboard_raster_unlit.py` raises lonboard's 10 s tile request
+timeout to 120 s (a slow batch otherwise leaves blank tiles deck never re-asks
+for) and turns off deck's default lighting on
 lonboard's raster tile mesh (every tile otherwise draws ~0.69x darker; no Python
-prop reaches it). Re-run after any install, then hard-reload the browser.
+prop reaches it). Re-run after any install, then restart the kernel (the JS is read into the
+Map widget when it is created; a browser reload changes nothing).
 
 History: grew out of [x-sql-marimo](https://github.com/kentstephen/x-sql-marimo)
 (the xarray-sql / DataFusion / DuckDB fold notebooks) on 2026-08-20 and moved here because its map no longer uses that

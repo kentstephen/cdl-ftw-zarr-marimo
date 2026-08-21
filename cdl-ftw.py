@@ -83,11 +83,12 @@ Measured 2026-08-20 (home link), Fresno 20 x 20 km: fields from US_CA.parquet
 FTW probabilities through DuckDB at 4x 1.2 s, 16x 0.9 s. Record in
 docs/ftw-cdl-notes.md.
 
-Run from the root project (its xarray-sql is the 0.4.0rc1 DuckDB backend since
-2026-08-20; this is one backend, not the multi-backend test bed):
-  uv run marimo edit xsql-cdl-fields.py
-or self-contained:
-  uv run marimo edit cdl-ftw.py --sandbox
+Run from THIS repo's venv (the lonboard JS there carries the two patches from
+tools/patch_lonboard_raster_unlit.py: unlit tiles, 120 s tile timeout; a
+--sandbox env would be an unpatched lonboard: dark tiles and a blank map after
+any batch over 10 s):
+  uv sync && uv run python tools/patch_lonboard_raster_unlit.py
+  uv run marimo edit cdl-ftw.py
 """
 
 import marimo
@@ -187,7 +188,7 @@ def _(mo):
     | data | type on disk | how DuckDB reads it |
     |---|---|---|
     | CDL `crop_type(year, y, x)`, 30 m, EPSG:5070, 2008-2025, + majority pyramid | icechunk Zarr v3, uint8 | `xql.register` (xarray-sql DuckDB backend): tables `cdl_1` (native) .. `cdl_256` |
-    | FTW softmax P(non-field / field / boundary), 10 m, EPSG:4326, 14 levels | plain Zarr v3, float32 | `xql.register`: tables `ftw_4` (40 m), `ftw_16` (160 m); the map's clip and disagreement |
+    | FTW softmax P(non-field / field / boundary), 10 m, EPSG:4326, 14 levels | plain Zarr v3, float32 | `xql.register`: tables `ftw_4` (40 m) .. `ftw_256` (2.56 km); the map's clip and disagreement |
     | FTW field outlines, one PMTiles per state | tippecanoe MVT, z0-13 | not DuckDB: ranged GETs + MVT decode, drawn on the map |
     | FTW field polygons, one GeoParquet per state, both years in the file | fiboa GeoParquet, CRS84 | `read_parquet(...)` over httpfs (+ `cache_httpfs` on disk), `bbox` struct prunes row groups; the SQL cells below |
 
@@ -213,7 +214,10 @@ def _():
         "results-by-admin-conf/admin:country_code=US/"
     )
     FTW_ZARR = "tge-labs/ftw-global-data/predictions/zarr/alpha/global.zarr/"
-    FTW_LEVELS = [4, 16]          # probability pyramid levels registered (40 m, 160 m)
+    FTW_LEVELS = [4, 16, 64, 256] # probability pyramid levels read for the mask
+    # (40 m, 160 m, 640 m, 2.56 km): the clip and the disagreement work at EVERY
+    # zoom (2026-08-21; before, a 0.35 deg^2 cap turned FTW off below tile z12 and
+    # deck's placeholder tiles flashed the unclipped low-zoom tiles while panning)
     FTW_RES = 8.98311982e-05      # degrees per 10 m pixel at the root
     FTW_Y0 = 83.748345            # top edge of the grid
     FTW_YEARS = (2024, 2025)
@@ -241,12 +245,10 @@ def _():
     TILE_CACHE = 3000             # PNG tiles kept (~20-40 KB each)
     TILE_ZMIN, TILE_ZMAX = 2, 15
     EXTENT = [-125.0, 24.0, -66.5, 49.8]   # CONUS: no tile requests outside it
-    FTW_BOX_DEG2 = 0.35           # FTW modes only when the box is under this
-    FTW_PAD = 1.6                 # the P(field) grid is read for PAD x the serve box
-    FTW_FETCH_DEG2 = 0.4          # ... capped at this area, so small pans and
-    # zoom-ins are cache hits (the raster read is area-proportional, ~1 s per
-    # 0.04 deg² at 40 m from home)
     FTW_TILE_ZMAX = 13            # the per-state PMTiles' top zoom (outlines)
+    OUTLINE_ZMIN = 12             # outlines drawn from this tile zoom up (a z5
+    # outline tile holds a state's every field: decoding and drawing them made
+    # a zoom-out crawl once the clip worked at every zoom, 2026-08-21)
     MARGIN = 0.35                 # fold box slack beyond the viewport
     HTTPFS_CACHE_DIR = "x-sql-marimo/duckdb-httpfs-cache"   # under the OS tmp dir:
     # DuckDB's cache_httpfs community extension writes every byte range it
@@ -271,13 +273,11 @@ def _():
         DIS,
         ENDPOINT,
         FIELDS0,
-        FTW_BOX_DEG2,
         FTW_BUCKET,
-        FTW_FETCH_DEG2,
         FTW_LEVELS,
-        FTW_PAD,
         FTW_RES,
         FTW_TILE_ZMAX,
+        OUTLINE_ZMIN,
         FTW_VEC,
         FTW_Y0,
         FTW_YEARS,
@@ -1283,9 +1283,6 @@ def _(
     ACRES_PER_KM2,
     DIS,
     FIELDS0,
-    FTW_BOX_DEG2,
-    FTW_FETCH_DEG2,
-    FTW_PAD,
     FTW_RES,
     FTW_TILE_ZMAX,
     FTW_Y0,
@@ -1295,6 +1292,7 @@ def _(
     LEVELS,
     LEVELS10,
     NONCROP_CODES,
+    OUTLINE_ZMIN,
     PX_PER,
     ROW_BUDGET,
     CLASSES,
@@ -1438,7 +1436,9 @@ def _(
         chunks, ~20 km at 40 m) cached in memory and on disk (packbits, 32 KB
         each), so a pan reads only the chunks it has not seen, in ONE query
         over their bounding box. Returns (mask, ix0, iy0, res, factor)."""
-        f = 4 if px_m < 120 else 16
+        # the coarsest level whose cell is within 4/3 of the CDL pixel served
+        # (30 m -> 40 m, 120 m -> 160 m, 480 m -> 640 m, 1.9 km -> 2.56 km)
+        f = max(l for l in FTW_LEVELS if 10 * l <= max(px_m * 4 / 3, 40))
         res = FTW_RES * f
         ix0 = int(math.floor((W + 180.0) / res))
         ix1 = int(math.floor((E + 180.0) / res))
@@ -1516,20 +1516,6 @@ def _(
         ks = [k for k in _LV if k <= want]
         return ks[-1] if ks else _LV[0]
 
-    def _ftw_zoom_ok(z, lat):
-        """The FTW modes (clip, disagreement) are decided per TILE ZOOM, not
-        per batch: the view's box at that zoom must be under FTW_BOX_DEG2.
-        Deciding on the batch's union box (2026-08-20) made ONE view mix
-        clipped and unclipped tiles: the first batch of a view is the whole
-        view (a big box, FTW off), a pan's batch is two or three tiles (a
-        small box, FTW on); the cache key does not know which, so both stayed
-        on screen (Stephen, 2026-08-21: "just the fields, sometimes
-        everything, some tiles instead of all"). deck asks for tiles at
-        about view zoom + log2(512 / TILE_PX)."""
-        vz = z - math.log2(512 / TILE_PX)
-        W, S, E, N = bbox4326({"longitude": 0.0, "latitude": lat, "zoom": vz})
-        return (E - W) * (N - S) <= FTW_BOX_DEG2
-
     def _serve_batch(z, keys):
         """Blocking (worker thread): one query for the batch, PNG per tile
         into the cache, status + legend pushed on the loop thread."""
@@ -1554,8 +1540,6 @@ def _(
         gy1 = float(ys[0]) + pix / 2 if len(ys) else y1
         fields, dis = _fields, _dis
         note = ""
-        if (fields or dis) and not _ftw_zoom_ok(z, (S + N) / 2):
-            fields, dis, note = False, False, " · zoom in for FTW"
         if _dis_req and not _ftw_ok:
             note += " · disagreement needs 2024 or 2025"
         ftw, f = None, 0
@@ -1563,7 +1547,9 @@ def _(
             ftw = _ftw_mask(_B * k, W, S, E, N)
             f = ftw[4]
         rings, nt = None, 0
-        if fields:
+        if fields and z < OUTLINE_ZMIN:
+            note += f" · outlines from z{OUTLINE_ZMIN}"
+        if fields and z >= OUTLINE_ZMIN:
             rings, nt, _nm = ftw_tile_rings(
                 _states_in(W, S, E, N), _fyear, W, S, E, N, min(z, FTW_TILE_ZMAX))
         pngs, counts, ndrawn, pxa = render_tiles(
@@ -1636,16 +1622,66 @@ def _(
             return set()
         return {(_state, z, x, y) for x in xs for y in ys}
 
+    def _make_raster():
+        """A fresh RasterLayer (a NEW widget model each time: under marimo a
+        layer removed from `deck.layers` is closed, and re-adding the same
+        object draws nothing, the JS says 'Model not found for key',
+        2026-08-21). The tile functions come from HOLD, not by name: they are
+        defined BELOW this function in the cell, and marimo drops a cell's
+        underscore temporaries after the run unless a closure's reference
+        to them is seen (a forward reference is not: "NameError:
+        _cell_..._fetch is not defined" from the search task, 2026-08-21)."""
+        _tms0 = morecantile.tms.get("WebMercatorQuad")
+        _m = 20037508.342789244
+        _tms = _tms0.model_copy(update={"boundingBox": morecantile.models.TMSBoundingBox(
+            lowerLeft=(-_m, -_m), upperRight=(_m, _m), crs=_tms0.crs)})
+        raster = RasterLayer(
+            _tile_matrix_set=_tms,
+            _crs=_tms.crs,
+            _fetch_tile=HOLD["fetch"],
+            _render_tile=HOLD["render"],
+            min_zoom=TILE_ZMIN,
+            max_zoom=TILE_ZMAX,
+            extent=EXTENT,
+            _tile_size=TILE_PX,
+            debounce_time=30,
+            opacity=1.0,
+            pickable=False,
+        )
+        return raster
+
+    def _rebuild():
+        """REMOVE then ADD a NEW layer. Under marimo every lonboard layer has
+        id `undefined`, so a direct replacement reads to deck as an update of
+        the same TileLayer and it KEEPS its loaded tiles (the old year / clip
+        stayed on screen until the camera moved them out; driven 2026-08-20).
+        An empty layer list in between finalises the old layer and the new
+        one asks for every tile afresh (cache hits come back in one batch)."""
+        HOLD["batch"] = None
+        HOLD["raster"] = _make_raster()
+        HOLD["layer_state"] = _state
+        deck.layers = []
+        deck.layers = [HOLD["raster"]]
+
     async def _run_batch(b):
-        await asyncio.sleep(BATCH_S)
-        b["closed"] = True
-        b["keys"] |= {k for k in _view_tiles(b["z"]) if k not in _tiles}
-        keys = sorted(b["keys"])
+        # the batch's future MUST resolve whatever happens: followers await
+        # it, and a batch that is neither closed nor resolved would collect
+        # every later request of its zoom, forever
         try:
+            await asyncio.sleep(BATCH_S)
+            b["closed"] = True
+            b["keys"] |= {k for k in _view_tiles(b["z"]) if k not in _tiles}
+            keys = sorted(b["keys"])
             await asyncio.get_running_loop().run_in_executor(None, _serve_batch, b["z"], keys)
             if not b["fut"].done():
                 b["fut"].set_result(True)
+        except asyncio.CancelledError:
+            b["closed"] = True
+            if not b["fut"].done():
+                b["fut"].set_exception(RuntimeError("batch cancelled"))
+            raise
         except Exception as _e:
+            b["closed"] = True
             if not b["fut"].done():
                 b["fut"].set_exception(_e)
             _say(f"serve error: {type(_e).__name__}: {_e}")
@@ -1661,14 +1697,19 @@ def _(
         if b is None or b["closed"] or b["z"] != z or b["state"] != _state:
             b = {"z": z, "state": _state, "keys": set(), "closed": False,
                  "fut": loop.create_future()}
+            # mark the exception retrieved even if every follower was cancelled
+            b["fut"].add_done_callback(lambda f: f.cancelled() or f.exception())
             b["task"] = loop.create_task(_run_batch(b))
             HOLD["batch"] = b
         b["keys"].add(key)
+        # shielded: a cancelled tile request must not abandon the batch
         await asyncio.shield(b["fut"])
         return _tiles.get(key)
 
     def _render(tile):
         return tile
+
+    HOLD["fetch"], HOLD["render"] = _fetch, _render
 
     def _spawn(coro):
         try:
@@ -1765,7 +1806,7 @@ def _(
         # clip, the disagreement split and the 18-year timelapse need no SQL
         W, S, E, N = bbox4326(vs)
         k, x0, y0, x1, y1, drop = _window(vs)
-        fields = _fields and (E - W) * (N - S) <= FTW_BOX_DEG2
+        fields = _fields
         lat_mid = math.radians((N + S) / 2)
         wm = (E - W) * 111_320 * math.cos(lat_mid)
         hm = (N - S) * 110_574
@@ -1902,14 +1943,20 @@ def _(
         ) or query
         return _name, _lon, _lat, _p.get("extent")
 
-    async def _do_search():
+    # ---- search: IN THIS RUN, like a toggle. It used to be a background
+    # task (Photon in a thread, fly_to, sleep, rebuild) and whatever it did
+    # after the cell run had ended never reached the frontend right: the
+    # map stayed empty after a flight until a button toggle rebuilt the layer
+    # inside a run (2026-08-21, Champaign). Photon is one ~0.3 s call.
+    if _act == "search" and _q:
         try:
-            _hit = await asyncio.get_running_loop().run_in_executor(
-                None, _photon_first, _q, _vsd(HOLD.get("vs"))
-            )
-            if _hit is None:
-                _say(f"no match: {_q}")
-                return
+            _hit = _photon_first(_q, _vsd(HOLD.get("vs")))
+        except Exception as _e:
+            _hit = None
+            _say(f"search error: {type(_e).__name__}: {_e}")
+        if _hit is None:
+            _say(f"no match: {_q}")
+        else:
             _name, _lon, _lat, _ext = _hit
             if _ext and len(_ext) == 4:
                 _span = max(abs(_ext[2] - _ext[0]), abs(_ext[1] - _ext[3]) * 2, 0.01)
@@ -1919,17 +1966,14 @@ def _(
             _zoom = max(3.5, min(13.5, _zoom))
             _vs = {"longitude": _lon, "latitude": _lat, "zoom": _zoom}
             HOLD["vs"] = _vs
+            HOLD["box"] = bbox4326(_vs)
             deck.fly_to(longitude=_lon, latitude=_lat, zoom=_zoom, duration=2000)
             _say(f"→ {_name}")
-        except Exception as _e:
-            _say(f"search error: {type(_e).__name__}: {_e}")
+            HOLD["layer_state"] = None     # rebuilt below, in this run
 
-    if _act == "search" and _q:
-        HOLD["stask0"] = _spawn(_do_search())
-
-    # ---- the layer: rebuilt only when the state changes (year, checkboxes,
-    # crops only, selection); an analyze or search click keeps it, so the
-    # map does not repaint. Inserted via deck.layers (the Map never re-runs).
+    # ---- the layer: rebuilt when the state changes (year, checkboxes, crops
+    # only, selection) and on a search; an analyze click keeps it, so the map
+    # does not repaint. Inserted via deck.layers (the Map never re-runs).
     if HOLD.get("layer_state") != _state or HOLD.get("raster") is None:
         # deck's TileLayer needs the TMS's boundingBox; morecantile's stock
         # WebMercatorQuad ships without one ("Bounding Box inference not yet
@@ -1938,34 +1982,7 @@ def _(
         # (getTileData returns null without tileMatrices). With a TMS every
         # tile renders through a mesh sub-layer that deck LIGHTS (~0.69x
         # darker, opacity ignored): tools/patch_lonboard_raster_unlit.py.
-        _tms0 = morecantile.tms.get("WebMercatorQuad")
-        _m = 20037508.342789244
-        _tms = _tms0.model_copy(update={"boundingBox": morecantile.models.TMSBoundingBox(
-            lowerLeft=(-_m, -_m), upperRight=(_m, _m), crs=_tms0.crs)})
-        raster = RasterLayer(
-            _tile_matrix_set=_tms,
-            _crs=_tms.crs,
-            _fetch_tile=_fetch,
-            _render_tile=_render,
-            min_zoom=TILE_ZMIN,
-            max_zoom=TILE_ZMAX,
-            extent=EXTENT,
-            _tile_size=TILE_PX,
-            debounce_time=30,
-            opacity=1.0,
-            pickable=False,
-        )
-        HOLD["raster"] = raster
-        HOLD["layer_state"] = _state
-        HOLD["batch"] = None
-        # REMOVE then ADD: under marimo every lonboard layer has id
-        # `undefined`, so a direct replacement reads to deck as an update of
-        # the same TileLayer and it KEEPS its loaded tiles (the old year /
-        # clip stayed on screen until the camera moved them out; driven
-        # 2026-08-20). An empty layer list in between finalises the old layer
-        # and the new one asks for every tile afresh.
-        deck.layers = []
-        deck.layers = [raster]
+        _rebuild()
     return
 
 
