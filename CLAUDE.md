@@ -6,7 +6,9 @@ colorblind-safe encodings: Stephen has trouble seeing red).
 
 ## What this is
 
-`cdl-ftw.py`, one marimo notebook: USDA Cropland Data Layer (icechunk Zarr v3,
+`cdl-ftw.py`, one marimo notebook (xarray + numpy + lonboard; the per-field
+joins as DuckDB SQL are `cdl-ftw-sql.py`, local and gitignored for now): USDA
+Cropland Data Layer (icechunk Zarr v3,
 `s3://us-west-2.opendata.source.coop/chill/usda-cropland-data-layer/v0.1.0.icechunk`,
 30 m 2008-2025 + 10 m 2024-2025, majority pyramids) x Fields of the World
 (`tge-labs/ftw-global-data` on the same bucket: P(field) Zarr at 10 m + pyramid,
@@ -74,8 +76,8 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   notebook from the files' own row-group stats. The parquet's geometry arrives
   `GEOMETRY('OGC:CRS84')`, cast `::GEOMETRY` for lonboard. Row groups are ~13
   MB and only roughly spatially sorted: a viewport read is 13-40 MB; that was
-  the ~10 s stall on a slow link, gone from the map now (raster clip + PMTiles
-  outlines), and `cache_httpfs` makes repeats local for the SQL cells.
+  the ~10 s stall on a slow link, gone from the map (raster clip + PMTiles
+  outlines); the SQL notebook's `cache_httpfs` makes repeats local there.
 - The PMTiles outlines: tippecanoe z0-13, layers "2024" / "2025", no id
   (draw-only); the reader is the HRRR counties film's PMTiles v3 + MVT decode
   by copy; segments along a tile's clip line are dropped (no seams) and
@@ -83,11 +85,13 @@ hold the full history; a copy of the FTW notes is in `docs/`.
 - The P(field) mask is cached by the Zarr's 512-px inner chunk, in memory and
   as packbits on disk (`$TMPDIR/x-sql-marimo/ftw-mask/`), so a pan reads only
   missing chunks. Tile blobs cache under `$TMPDIR/x-sql-marimo/ftw-tiles/`.
-- marimo lessons: underscore-prefixed cell locals are mangled (a helper must be
-  defined above its use in the same cell; `con.register(...)` explicitly, the
-  replacement scan does not see cell locals); every trait assignment from a
-  worker thread goes through `loop.call_soon_threadsafe`; an anywidget's CSS
-  classes must be prefixed (marimo's Tailwind owns `.hidden`).
+- marimo lessons: underscore-prefixed cell locals are mangled and dropped
+  after the run unless a closure's reference is seen (a helper must be defined
+  above its use in the same cell; forward references are not kept); every trait
+  assignment from a worker thread goes through `loop.call_soon_threadsafe`; an
+  anywidget's CSS classes must be prefixed (marimo's Tailwind owns `.hidden`);
+  widget comms are bound to the session stream of the run that opened them,
+  so a widget created from a background task never reaches the frontend.
 - The FTW modes (clip, disagreement) work at EVERY zoom: the mask picks the
   coarsest pyramid level within 4/3 of the CDL pixel served (`FTW_LEVELS` 4,
   16, 64, 256 = 40 m .. 2.56 km; all share the origin and 512-px chunks). The
@@ -128,6 +132,8 @@ hold the full history; a copy of the FTW notes is in `docs/`.
 - Verified 2026-08-20 night in this venv: TMS with boundingBox + the unlit
   patch -> tile colours equal the reference (255 -> 255, 150 -> 152).
 
+## Controls added 2026-08-21 evening
+
 - HUD `refresh` button (act "refresh"): `HOLD["layer_state"] = None` in the run,
   i.e. a rebuild like a toggle, the escape hatch if deck stalls. `TILE_ZMIN` 3.
   The camera is clamped to EXTENT + 2 deg in `_on_vs` via `deck.set_view_state`
@@ -137,10 +143,16 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   every zoom" is a blank at low zoom. Not changed; his call (a clip floor was
   offered).
 
+
 ## Open
 
-- Stephen has not flown the tile build with the patch applied. Judge rendering
-  by screenshots, never console errors.
-- The notebook still opens with the intro of the x-sql-marimo era; the shape
-  he wants is register -> the joins as SQL cells -> the map as an output.
+- Speed: he reports slow at high zoom too (no numbers yet); headless a cold
+  whole-view batch at z13 is 0.6-0.8 s, pans 0.2-1.3 s; the per-tile widget
+  round trip (45 messages, 6 in flight) is the floor on every state change.
+  512 px tiles would cut that by 4. The low-zoom clip floor is undecided.
+- One layer for the Map's life with a reload trigger (a `_gen` trait wired to
+  `updateTriggers.getTileData` in the JS patch) instead of a rebuild per toggle
+  would remove the remove/add flash and the model-lifetime dependence; not done.
+- Judge rendering by screenshots, never console errors; the status line's ms
+  is the serve time, not the browser fill.
 - Picking (which dataset says what at a point): geometric in JS, not deck's.
