@@ -1,0 +1,24 @@
+[project]
+name = "cdl-ftw-zarr-marimo"
+version = "0.1.0"
+description = "USDA Cropland Data Layer x Fields of the World: Zarr/icechunk read with xarray, drawn as tiles in lonboard under marimo, DuckDB for the per-field parquet joins"
+requires-python = ">=3.13"
+dependencies = [
+    "marimo==0.23.16",
+    "xarray-sql[duckdb]==0.4.0rc1",
+    "duckdb>=1.5.5",
+    "xarray",
+    "zarr>=3",
+    "icechunk",
+    "obstore",
+    "pyarrow>=25.0.0",
+    "numpy",
+    "anywidget>=0.9",
+    "lonboard>=0.16.0,<0.17",
+    "arro3-core",
+    "pillow==12.3.0",
+    "morecantile==7.0.3",
+]
+
+[dependency-groups]
+dev = ["playwright"]

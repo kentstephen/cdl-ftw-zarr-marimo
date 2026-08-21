@@ -1,0 +1,6 @@
+.venv/
+.claude/memory/
+__pycache__/
+*.pyc
+__marimo__/
+.cache/
