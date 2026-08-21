@@ -66,6 +66,12 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   replacement scan does not see cell locals); every trait assignment from a
   worker thread goes through `loop.call_soon_threadsafe`; an anywidget's CSS
   classes must be prefixed (marimo's Tailwind owns `.hidden`).
+- The FTW modes (clip, disagreement) are decided PER TILE ZOOM (`_ftw_zoom_ok`:
+  the view box at that zoom under FTW_BOX_DEG2, i.e. tile z >= 12 at CONUS
+  latitudes), never per batch box: the first batch of a view is the whole
+  view, a pan's batch is two tiles, and the cache key does not record the
+  decision, so a per-batch test mixed clipped and unclipped tiles in one view
+  (2026-08-21, "just the fields, sometimes everything, some tiles").
 - With fields ON, disagreement's orange class (CDL crop, no FTW field) cannot
   appear (the clip is the same grid); the legend says so.
 

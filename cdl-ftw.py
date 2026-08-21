@@ -87,7 +87,7 @@ Run from the root project (its xarray-sql is the 0.4.0rc1 DuckDB backend since
 2026-08-20; this is one backend, not the multi-backend test bed):
   uv run marimo edit xsql-cdl-fields.py
 or self-contained:
-  uv run marimo edit xsql-cdl-fields.py --sandbox
+  uv run marimo edit cdl-ftw.py --sandbox
 """
 
 import marimo
@@ -1516,6 +1516,20 @@ def _(
         ks = [k for k in _LV if k <= want]
         return ks[-1] if ks else _LV[0]
 
+    def _ftw_zoom_ok(z, lat):
+        """The FTW modes (clip, disagreement) are decided per TILE ZOOM, not
+        per batch: the view's box at that zoom must be under FTW_BOX_DEG2.
+        Deciding on the batch's union box (2026-08-20) made ONE view mix
+        clipped and unclipped tiles: the first batch of a view is the whole
+        view (a big box, FTW off), a pan's batch is two or three tiles (a
+        small box, FTW on); the cache key does not know which, so both stayed
+        on screen (Stephen, 2026-08-21: "just the fields, sometimes
+        everything, some tiles instead of all"). deck asks for tiles at
+        about view zoom + log2(512 / TILE_PX)."""
+        vz = z - math.log2(512 / TILE_PX)
+        W, S, E, N = bbox4326({"longitude": 0.0, "latitude": lat, "zoom": vz})
+        return (E - W) * (N - S) <= FTW_BOX_DEG2
+
     def _serve_batch(z, keys):
         """Blocking (worker thread): one query for the batch, PNG per tile
         into the cache, status + legend pushed on the loop thread."""
@@ -1540,7 +1554,7 @@ def _(
         gy1 = float(ys[0]) + pix / 2 if len(ys) else y1
         fields, dis = _fields, _dis
         note = ""
-        if (fields or dis) and (E - W) * (N - S) > FTW_BOX_DEG2:
+        if (fields or dis) and not _ftw_zoom_ok(z, (S + N) / 2):
             fields, dis, note = False, False, " · zoom in for FTW"
         if _dis_req and not _ftw_ok:
             note += " · disagreement needs 2024 or 2025"
