@@ -18,6 +18,8 @@ dependencies = [
     "arro3-core",
     "pillow==12.3.0",
     "morecantile==7.0.3",
+    "ipywidgets==8.1.8",
+    "traitlets==5.15.1",
 ]
 
 [dependency-groups]

@@ -69,6 +69,19 @@ hold the full history; a copy of the FTW notes is in `docs/`.
 - With fields ON, disagreement's orange class (CDL crop, no FTW field) cannot
   appear (the clip is the same grid); the legend says so.
 
+## Pins and the one trap
+
+- `ipywidgets==8.1.8`, `traitlets==5.15.1` are pinned because that is the pair
+  the build was verified under (a fresh resolve took 8.1.9 / 5.16.1; not shown
+  to break anything, pinned to keep the verified pair).
+- A `_NoTMS` experiment (a TileMatrixSet subclass serializing to null, to reach
+  lonboard's TMS-less path) was once left in by mistake: tiles were SERVED (the
+  status line showed batches) and the JS DISCARDED them (`getTileData` returns
+  null without tileMatrices), so the map was blank with no error anywhere. If
+  the map is ever blank while the status shows batches, check the TMS first.
+- Verified 2026-08-20 night in this venv: TMS with boundingBox + the unlit
+  patch -> tile colours equal the reference (255 -> 255, 150 -> 152).
+
 ## Open
 
 - Stephen has not flown the tile build with the patch applied. Judge rendering

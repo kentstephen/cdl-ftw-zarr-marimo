@@ -1917,23 +1917,20 @@ def _(
     # crops only, selection); an analyze or search click keeps it, so the
     # map does not repaint. Inserted via deck.layers (the Map never re-runs).
     if HOLD.get("layer_state") != _state or HOLD.get("raster") is None:
-        # NO TileMatrixSet: with one, lonboard's JS renders every tile
-        # through its reprojection sub-layer (own shader; measured 0.69x
-        # darker on every channel and `opacity` ignored; and morecantile's
-        # stock WebMercatorQuad lacks the boundingBox it demands). Without
-        # one it falls back to deck's plain TileLayer + BitmapLayer, which is
-        # exactly right for Web Mercator tiles: nothing to reproject.
-        # (lonboard's serializer cannot take None itself, so a TileMatrixSet
-        # subclass that serializes to null is passed instead)
+        # deck's TileLayer needs the TMS's boundingBox; morecantile's stock
+        # WebMercatorQuad ships without one ("Bounding Box inference not yet
+        # implemented": the layer never initialises and no tile is asked for).
+        # A TMS is REQUIRED: lonboard's TMS-less path is dead code in 0.16
+        # (getTileData returns null without tileMatrices). With a TMS every
+        # tile renders through a mesh sub-layer that deck LIGHTS (~0.69x
+        # darker, opacity ignored): tools/patch_lonboard_raster_unlit.py.
         _tms0 = morecantile.tms.get("WebMercatorQuad")
-
-        class _NoTMS(morecantile.models.TileMatrixSet):
-            def model_dump(self, *a, **k):
-                return None
-
+        _m = 20037508.342789244
+        _tms = _tms0.model_copy(update={"boundingBox": morecantile.models.TMSBoundingBox(
+            lowerLeft=(-_m, -_m), upperRight=(_m, _m), crs=_tms0.crs)})
         raster = RasterLayer(
-            _tile_matrix_set=_NoTMS.model_validate(_tms0.model_dump()),
-            _crs=_tms0.crs,
+            _tile_matrix_set=_tms,
+            _crs=_tms.crs,
             _fetch_tile=_fetch,
             _render_tile=_render,
             min_zoom=TILE_ZMIN,
