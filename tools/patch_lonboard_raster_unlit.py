@@ -37,11 +37,15 @@ def main() -> int:
         print(f"already patched: {js}")
         return 0
     n = src.count(OLD)
-    if n != 1:
-        print(f"expected the lit shader line exactly once, found {n}: {js}")
+    if n == 0:
+        print(f"lit shader line not found: {js}")
         print("lonboard", lonboard.__version__, "(the bundle changed; update OLD)")
         return 1
+    # lonboard 0.16 carries the line TWICE: deck's SimpleMeshLayer shader and
+    # the raster tile mesh's copy of it. Both go unlit (nothing here wants a
+    # lit mesh; the archived SurfaceLayer patch wanted the same thing).
     out = src.replace(OLD, NEW)
+    print(f"replacing {n} occurrence(s)")
     fd, tmp = tempfile.mkstemp(dir=js.parent, prefix="index.js.", suffix=".tmp")
     with os.fdopen(fd, "w") as f:
         f.write(out)
