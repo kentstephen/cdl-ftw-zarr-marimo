@@ -30,6 +30,6 @@ uv run marimo edit cdl-ftw.py
 lonboard's raster tile mesh (every tile otherwise draws ~0.69x darker; no Python
 prop reaches it). Re-run after any install, then hard-reload the browser.
 
-History: grew out of `x-sql-marimo` (the xarray-sql / DataFusion / DuckDB fold
-notebooks) on 2026-08-20 and moved here because its map no longer uses that
+History: grew out of [x-sql-marimo](https://github.com/kentstephen/x-sql-marimo)
+(the xarray-sql / DataFusion / DuckDB fold notebooks) on 2026-08-20 and moved here because its map no longer uses that
 engine. Record in `docs/ftw-cdl-notes.md`.
