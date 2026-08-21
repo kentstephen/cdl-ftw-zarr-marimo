@@ -2,8 +2,6 @@
 # requires-python = ">=3.13"
 # dependencies = [
 #     "marimo",
-#     "xarray-sql[duckdb]==0.4.0rc1",
-#     "duckdb>=1.5.5",
 #     "xarray",
 #     "zarr>=3",
 #     "icechunk",
@@ -11,15 +9,17 @@
 #     "pyarrow>=25.0.0",
 #     "numpy",
 #     "anywidget>=0.9",
-#     "lonboard>=0.16.0",
+#     "lonboard>=0.16.0,<0.17",
 #     "arro3-core",
 #     "pillow==12.3.0",
 #     "morecantile==7.0.3",
+#     "ipywidgets==8.1.8",
+#     "traitlets==5.15.1",
 # ]
 # ///
-"""USDA Cropland Data Layer with Fields of the World, as DuckDB SQL in marimo.
+"""USDA Cropland Data Layer with Fields of the World: xarray + numpy tiles in lonboard.
 
-The crops notebook (x-sql-marimo/xsql-cdl-crops.py) plus two checkboxes. The map is always
+Born as the crops notebook (x-sql-marimo/xsql-cdl-crops.py) plus two checkboxes. The map is always
 CDL pixel squares, 2008-2025, served from the pyramid by the camera as before
 ("crops only" / everything as there). FTW (Fields of the World: the PRUE
 model's field polygons from Sentinel-2 at 10 m, 2024 and 2025, ~1.6 B fields
@@ -42,25 +42,22 @@ are the 30 m group, fields still clip them, disagreement is greyed out with the
 reason. Field shapes change over time, which is why nothing here claims a
 per-field history across years.
 
-WHICH DATA, FROM WHERE, WHAT TYPE (every leg is DuckDB):
+WHICH DATA, FROM WHERE, WHAT TYPE (xarray reads the Zarr, numpy draws; no DuckDB
+here since 2026-08-21; the joins as SQL are a separate local notebook):
 
-  CDL crop_type 2008-2025, 30 m, EPSG:5070 (+ majority pyramid 2x..256x)
+  CDL crop_type 2008-2025, 30 m, EPSG:5070 (+ majority pyramid 2x..256x), and the
+  10 m group 2024-2025 (its own 2x..512x ladder)
     s3://us-west-2.opendata.source.coop/chill/usda-cropland-data-layer/v0.1.0.icechunk
-    icechunk Zarr v3, uint8 -> xql.register(con, "cdl_<k>", ds) on the xarray-sql
-    0.4.0rc1 DuckDB backend: one table per pyramid level, columns year/y/x/crop_type.
-  FTW field polygons 2024 + 2025 (fiboa GeoParquet, one file per US state, both
-  years in the file, CRS84)
-    s3://us-west-2.opendata.source.coop/tge-labs/ftw-global-data/predictions/vectors/
-      alpha/results-by-admin-conf/admin:country_code=US/US_<ST>.parquet
-    -> read_parquet() through httpfs + spatial (+ cache_httpfs: fetched byte ranges
-       kept on disk under the OS tmp dir); the `bbox` struct prunes row groups.
-       Used by the SQL cells under the map ONLY; the map never reads it.
+    icechunk Zarr v3, uint8 -> xr.open_zarr per level; the window = .sel(year).sel(x, y).
   FTW softmax probabilities 2024 + 2025, 10 m, EPSG:4326, 14 multiscale levels
     s3://us-west-2.opendata.source.coop/tge-labs/ftw-global-data/predictions/zarr/
       alpha/global.zarr (+ /4x .. /8192x)
     plain Zarr v3 (not icechunk), float32 variables(time, band, y, x), bands
-    non_field_background / field / field_boundaries -> xql.register(con, "ftw_<k>", ds)
-    on the same backend, blocks = the INNER chunk (512) so x/y predicates prune.
+    non_field_background / field / field_boundaries -> xr.open_zarr of 4x / 16x /
+    64x / 256x; P(field) >= 0.5 is the clip and the disagreement, cached by the
+    512-px inner chunk in memory and on disk.
+  FTW field polygons (fiboa GeoParquet, one file per US state): NOT read here;
+    the per-field joins (ST_Contains, crop, purity, the 2x2) are a separate local notebook.
   FTW per-state PMTiles (tippecanoe z0-13, layers "2024" / "2025", no id)
     same directory, US_<ST>.pmtiles -> ranged GETs (obstore), hand-rolled
     PMTiles v3 + MVT decode (the HRRR counties film's, by copy): the FIELD
@@ -99,6 +96,31 @@ app = marimo.App(width="full", sql_output="native")
 
 @app.cell
 def _():
+    # ---- lonboard's shipped JS needs three edits (tools/patch_lonboard_raster_
+    # unlit.py: unlit tile mesh, 120 s tile request timeout, a per-instance deck
+    # layer id + reload trigger). They are applied HERE, in whatever environment
+    # is running this notebook, before the Map is created: `--sandbox` builds a
+    # fresh environment every launch, and a day was lost (2026-08-21) to a
+    # kernel whose lonboard (0.17.0b1, unpatched) was not the venv's (0.16,
+    # patched). Idempotent; prints what it did.
+    import importlib.util as _ilu
+    import os as _os
+
+    _here = _os.path.dirname(_os.path.abspath(__file__)) if "__file__" in globals() else _os.getcwd()
+    _tool = _os.path.join(_here, "tools", "patch_lonboard_raster_unlit.py")
+    LONBOARD_PATCHED = False
+    if _os.path.exists(_tool):
+        _spec = _ilu.spec_from_file_location("patch_lonboard_raster_unlit", _tool)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        LONBOARD_PATCHED = _mod.main() == 0
+    else:
+        print(f"patch tool not found at {_tool}; lonboard runs unpatched")
+    return (LONBOARD_PATCHED,)
+
+
+@app.cell
+def _():
     import asyncio
     import base64
     import gzip
@@ -116,13 +138,11 @@ def _():
     from PIL import Image, ImageDraw
 
     import anywidget
-    import duckdb
     import obstore
     import icechunk
     import xarray as xr
     import zarr
     import traitlets
-    import xarray_sql as xql
     import urllib.parse
     import urllib.request
 
@@ -147,7 +167,6 @@ def _():
         anywidget,
         asyncio,
         base64,
-        duckdb,
         gzip,
         icechunk,
         io,
@@ -164,7 +183,6 @@ def _():
         time,
         traitlets,
         urllib,
-        xql,
         xr,
         zarr,
     )
@@ -173,9 +191,9 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    # Cropland Data Layer with Fields of the World, in SQL
+    # Cropland Data Layer with Fields of the World
 
-    The [CDL notebook](xsql-cdl-crops.py) plus two checkboxes. The map is the
+    Born as the CDL crops notebook plus two checkboxes. The map is the
     **USDA Cropland Data Layer**: what grew on every pixel of CONUS, each year
     2008-2025, served from its pyramid by the camera (2024 and 2025 from the 10 m
     group, older years 30 m). **Fields of the World** (the PRUE model's field
@@ -183,14 +201,15 @@ def _(mo):
     clipped to the inside of the fields with the field outlines drawn (the 2024
     footprint on older years); and **disagreement** (2024-2025 only): the pixels
     repainted by whether CDL calls them a crop and whether FTW sees a field there,
-    with or without the fields on. Everything is **DuckDB**.
+    with or without the fields on. The map is **xarray + numpy** (tiles in lonboard);
+    the per-field joins as SQL are a separate notebook, kept out of the repo for now.
 
-    | data | type on disk | how DuckDB reads it |
+    | data | type on disk | how it is read |
     |---|---|---|
-    | CDL `crop_type(year, y, x)`, 30 m, EPSG:5070, 2008-2025, + majority pyramid | icechunk Zarr v3, uint8 | `xql.register` (xarray-sql DuckDB backend): tables `cdl_1` (native) .. `cdl_256` |
-    | FTW softmax P(non-field / field / boundary), 10 m, EPSG:4326, 14 levels | plain Zarr v3, float32 | `xql.register`: tables `ftw_4` (40 m) .. `ftw_256` (2.56 km); the map's clip and disagreement |
+    | CDL `crop_type(year, y, x)`, 30 m, EPSG:5070, 2008-2025, + majority pyramid | icechunk Zarr v3, uint8 | `xr.open_zarr` per level; the window is one `.sel` |
+    | FTW softmax P(non-field / field / boundary), 10 m, EPSG:4326, 14 levels | plain Zarr v3, float32 | `xr.open_zarr` of 4x / 16x / 64x / 256x; P(field) >= 0.5 is the clip and the disagreement |
     | FTW field outlines, one PMTiles per state | tippecanoe MVT, z0-13 | not DuckDB: ranged GETs + MVT decode, drawn on the map |
-    | FTW field polygons, one GeoParquet per state, both years in the file | fiboa GeoParquet, CRS84 | `read_parquet(...)` over httpfs (+ `cache_httpfs` on disk), `bbox` struct prunes row groups; the SQL cells below |
+    | FTW field polygons, one GeoParquet per state, both years in the file | fiboa GeoParquet, CRS84 | not here (a separate notebook: `read_parquet` over httpfs, `ST_Contains`) |
 
     FTW's `confidence` column is NULL for the whole US (not one of the 24 labelled
     countries), so nothing here uses it. Field shapes change over time: disagreement
@@ -243,19 +262,13 @@ def _():
     # the PNGs cut per tile from the shared grid. Tiles cached in memory.
     BATCH_S = 0.05                # how long the first request of a burst waits
     TILE_CACHE = 3000             # PNG tiles kept (~20-40 KB each)
-    TILE_ZMIN, TILE_ZMAX = 2, 15
+    TILE_ZMIN, TILE_ZMAX = 3, 15   # z3: no continental tiles (Stephen, 2026-08-21)
     EXTENT = [-125.0, 24.0, -66.5, 49.8]   # CONUS: no tile requests outside it
     FTW_TILE_ZMAX = 13            # the per-state PMTiles' top zoom (outlines)
     OUTLINE_ZMIN = 12             # outlines drawn from this tile zoom up (a z5
     # outline tile holds a state's every field: decoding and drawing them made
     # a zoom-out crawl once the clip worked at every zoom, 2026-08-21)
     MARGIN = 0.35                 # fold box slack beyond the viewport
-    HTTPFS_CACHE_DIR = "x-sql-marimo/duckdb-httpfs-cache"   # under the OS tmp dir:
-    # DuckDB's cache_httpfs community extension writes every byte range it
-    # fetches over httpfs (the FTW parquet row groups, ~13 MB each) to disk, so
-    # a place touched once is read locally afterwards, on any connection and
-    # across restarts. Measured (CA file, Fresno then two pans): 2.3 / 1.4 /
-    # 1.6 s cold, 0.3 / 0.0 / 0.0 s in a fresh process. None disables.
     VIEW_W, VIEW_H = 1400, 700    # the usual guess; no ruler
     HOME = {"longitude": -121.45, "latitude": 37.95, "zoom": 12.0}  # the Delta west of Stockton
 
@@ -284,7 +297,6 @@ def _():
         FTW_ZARR,
         HOLD,
         HOME,
-        HTTPFS_CACHE_DIR,
         LEVELS,
         LEVELS10,
         MARGIN,
@@ -310,21 +322,15 @@ def _(
     FTW_BUCKET,
     FTW_LEVELS,
     FTW_ZARR,
-    HTTPFS_CACHE_DIR,
     LEVELS,
     LEVELS10,
     PREFIX,
     S3Store,
-    duckdb,
     icechunk,
-    os,
-    tempfile,
-    threading,
-    xql,
     xr,
     zarr,
 ):
-    # ---- open both stores, register every level as a DuckDB table -----------
+    # ---- open both stores: every pyramid level as an xarray Dataset ---------
     storage = icechunk.s3_storage(
         bucket=BUCKET,
         prefix=PREFIX,
@@ -335,23 +341,6 @@ def _(
     )
     _repo = icechunk.Repository.open(storage)
     _session = _repo.readonly_session("main")
-
-    def _connect():
-        c = duckdb.connect()
-        c.sql(
-            "INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;"
-            " SET s3_region='us-west-2'; SET s3_url_style='path';"
-        )
-        if HTTPFS_CACHE_DIR:
-            _d = os.path.join(tempfile.gettempdir(), HTTPFS_CACHE_DIR)
-            os.makedirs(_d, exist_ok=True)
-            c.sql(
-                "INSTALL cache_httpfs FROM community; LOAD cache_httpfs;"
-                f" SET cache_httpfs_cache_directory='{_d}';"
-            )
-        return c
-
-    con = _connect()
 
     DS = {}
     for _k in LEVELS:
@@ -379,30 +368,7 @@ def _(
         FTW_DS[_k] = xr.open_zarr(_ftw_store, group=f"{_k}x", chunks=None,
                                   consolidated=False)
 
-    def _register(c):
-        for _k in LEVELS:
-            _ds = DS[_k]
-            # whole-plane per year at coarse levels, 2048^2 at fine levels so
-            # the x/y predicates prune fragments (crops notebook's layout)
-            if _k >= 32:
-                _chunks = {"year": 1, "y": _ds.sizes["y"], "x": _ds.sizes["x"]}
-            else:
-                _chunks = {"year": 1, "y": 2048, "x": 2048}
-            xql.register(c, f"cdl_{_k}", _ds, chunks=_chunks)
-        for _k in LEVELS10:
-            _ds = DS10[_k]
-            if _k >= 128:
-                _chunks = {"year": 1, "y": _ds.sizes["y"], "x": _ds.sizes["x"]}
-            else:
-                _chunks = {"year": 1, "y": 2048, "x": 2048}
-            xql.register(c, f"cdl10_{_k}", _ds, chunks=_chunks)
-        for _k in FTW_LEVELS:
-            xql.register(c, f"ftw_{_k}", FTW_DS[_k],
-                         chunks={"time": 1, "band": 3, "y": 512, "x": 512})
-
-    _register(con)
-
-    # ---- classes table from the CDL store's own attrs ----------------------
+    # ---- the classes, from the CDL store's own attrs -------------------------
     _at = DS[1]["crop_type"].attrs
     _names, _colors = _at["class_names"], _at["class_colors"]
 
@@ -435,13 +401,6 @@ def _(
             _i += 1
         _sr, _sg, _sb = _rgb(_safe)
         _rows.append((int(_code), _nm, _hx, _safe, _sr, _sg, _sb, _noncrop(_nm)))
-
-    _CLASSES_DDL = (
-        "CREATE TABLE classes(code UTINYINT, name VARCHAR, hex_official VARCHAR,"
-        " hex VARCHAR, r UTINYINT, g UTINYINT, b UTINYINT, noncrop BOOLEAN)"
-    )
-    con.sql(_CLASSES_DDL)
-    con.executemany("INSERT INTO classes VALUES (?,?,?,?,?,?,?,?)", _rows)
 
     # ---- the FTW state partitions: each file's extent from its OWN row-group
     # stats (parquet_metadata over all 60 files, 3.7 s on 2026-08-20; embedded
@@ -481,27 +440,18 @@ def _(
         ("WV", -82.6197, 37.2515, -77.7529, 40.6241), ("WY", -111.1497, 40.8559, -103.8754, 45.1036),
         ("YT", -141.0438, 60.0153, -139.0725, 69.6589),
     ]
-    _STATES_DDL = (
-        "CREATE TABLE ftw_states(st VARCHAR, xmin DOUBLE, ymin DOUBLE,"
-        " xmax DOUBLE, ymax DOUBLE)"
-    )
-    con.sql(_STATES_DDL)
-    con.executemany("INSERT INTO ftw_states VALUES (?,?,?,?,?)", _STATES)
-
     NONCROP_CODES = sorted(r[0] for r in _rows if r[7])
-    # the map pipeline is xarray + numpy (no DuckDB): the datasets, the class
-    # table and the state extents go out as plain Python objects
+    # the map pipeline is xarray + numpy: the datasets, the classes and the
+    # state extents go out as plain Python objects
     CLASSES = {int(r[0]): (r[1], r[3], int(r[4]), int(r[5]), int(r[6]), bool(r[7])) for r in _rows}
     STATES = _STATES
-    return CLASSES, DS, DS10, FTW_DS, NONCROP_CODES, STATES, con
+    return CLASSES, DS, DS10, FTW_DS, NONCROP_CODES, STATES
 
 
 @app.cell
 def _(
     ACRES_PER_KM2,
-    FTW_BUCKET,
     FTW_RES,
-    FTW_VEC,
     FTW_Y0,
     Image,
     ImageDraw,
@@ -513,7 +463,7 @@ def _(
     math,
     np,
 ):
-    # ---- the serve helpers: pure functions of (connection, box, ...), shared
+    # ---- the serve helpers: pure functions of (box, ...), shared
     # by the map cell (opening view) and the wiring cell. No HUD dependency, so
     # the map cell never re-runs on a control change.
     def albers_xy(lon, lat):
@@ -546,7 +496,7 @@ def _(
     def albers_box(W, S, E, N):
         """Albers (EPSG:5070) box of a lon/lat box: densified boundary (a
         parallel bows; corners alone clip the south), clamped to the array's
-        extent. numpy twin of to5070 for the tile serve (no DuckDB call)."""
+        extent (the densified, clamped box; numpy, no DuckDB)."""
         lons = np.linspace(W, E, 9)
         lats = np.linspace(S, N, 9)
         bl = np.concatenate([lons, lons, np.full(9, W), np.full(9, E)])
@@ -658,50 +608,12 @@ def _(
         return (vs["longitude"] - dlon, vs["latitude"] - dlat,
                 vs["longitude"] + dlon, vs["latitude"] + dlat)
 
-    def to5070(c, lon0, lat0, lon1, lat1):
-        # densified box boundary, clamped to the array's Albers bbox (an
-        # EPSG:5070 parallel bows; corner-only min clips the Gulf coast)
-        _N = 8
-        pts = []
-        for _i in range(_N + 1):
-            _t = _i / _N
-            _lon = lon0 + (lon1 - lon0) * _t
-            _lat = lat0 + (lat1 - lat0) * _t
-            pts += [(_lon, lat0), (_lon, lat1), (lon0, _lat), (lon1, _lat)]
-        vals = ", ".join(f"({a}, {b})" for a, b in pts)
-        rows = c.sql(
-            f"""SELECT ST_X(p), ST_Y(p) FROM (
-                  SELECT ST_Transform(ST_Point(lon, lat), 'EPSG:4326', 'EPSG:5070',
-                                      always_xy := true) AS p
-                  FROM (VALUES {vals}) AS t(lon, lat))"""
-        ).fetchall()
-        xs = [r[0] for r in rows]
-        ys = [r[1] for r in rows]
-        _X0, _Y0, _X1, _Y1 = -2417835.0, 158265.0, 2387295.0, 3321225.0
-        return (max(min(xs), _X0), max(min(ys), _Y0),
-                min(max(xs), _X1), min(max(ys), _Y1))
-
-    def ftw_states_in(c, W, S, E, N):
-        """State codes whose FTW extent meets the box."""
-        return [r[0] for r in c.sql(
-            f"""SELECT st FROM ftw_states
-                WHERE xmax > {W} AND xmin < {E} AND ymax > {S} AND ymin < {N}
-                ORDER BY st"""
-        ).fetchall()]
-
-    def ftw_files(c, W, S, E, N):
-        """The state parquet files whose extent meets the box (SQL cells)."""
-        return [f"s3://{FTW_BUCKET}/{FTW_VEC}US_{st}.parquet"
-                for st in ftw_states_in(c, W, S, E, N)]
-
     return (
         albers_box,
         albers_xy,
         bbox4326,
-        ftw_files,
         render_tiles,
         tile_box,
-        to5070,
     )
 
 
@@ -986,7 +898,7 @@ def _(anywidget, traitlets):
         strip plus two checkboxes, `fields` (clip to the FTW fields, outlines
         drawn) and `disagreement` (repaint by CDL-crop x FTW-field; greyed
         out before 2024). Proven trait types only: `ctl` Unicode browser ->
-        kernel (JSON with `act`: "set" | "analyze" | "search"), `status` /
+        kernel (JSON with `act`: "set" | "analyze" | "search" | "refresh"), `status` /
         `panel` / `legend` Unicode kernel -> browser. Commits on `change` +
         250 ms debounce, never `input`."""
 
@@ -1064,6 +976,13 @@ def _(anywidget, traitlets):
           const btn = document.createElement("button");
           btn.textContent = "analyze what's in view";
           btn.style.cssText = btnCss;
+          // refresh: the kernel rebuilds the layer (what a toggle does), every
+          // tile re-requested (cache hits at once); the escape hatch if deck
+          // ever stalls (Stephen, 2026-08-21)
+          const rfr = document.createElement("button");
+          rfr.textContent = "refresh";
+          rfr.title = "rebuild the tile layer";
+          rfr.style.cssText = btnCss;
           const search = document.createElement("input");
           search.type = "search";
           search.placeholder = "find a place…";
@@ -1127,7 +1046,7 @@ def _(anywidget, traitlets):
           };
           model.on("change:legend", renderLegend);
           renderLegend();
-          box.append(yl, prevB, range, nextB, yv, lab, labF, labD, btn, search, legendBox);
+          box.append(yl, prevB, range, nextB, yv, lab, labF, labD, btn, rfr, search, legendBox);
           const status = document.createElement("div");
           status.style.cssText =
             "font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;" +
@@ -1201,6 +1120,7 @@ def _(anywidget, traitlets):
             res.innerHTML = '<span style="opacity:.6">analyzing…</span>';
             send("analyze");
           });
+          rfr.addEventListener("click", () => send("refresh"));
           const paintS = () => { status.textContent = model.get("status") || ""; };
           const paintP = () => {
             const html = model.get("panel") || "";
@@ -1250,9 +1170,11 @@ def _(anywidget, traitlets):
 
 
 @app.cell
-def _(CartoStyle, HOLD: dict, HOME, Map, MaplibreBasemap):
-    # ---- map cell: builds the Map, must never re-run. The ONE layer is a
-    # RasterLayer (deck TileLayer: deck asks for z/x/y tiles as the camera
+def _(CartoStyle, HOLD: dict, HOME, LONBOARD_PATCHED, Map, MaplibreBasemap):
+    # ---- map cell: builds the Map, must never re-run. LONBOARD_PATCHED orders
+    # it after the patch cell (the JS is read when the Map is created).
+    _ = LONBOARD_PATCHED
+    # The ONE layer is a RasterLayer (deck TileLayer: deck asks for z/x/y tiles as the camera
     # moves, the kernel answers PNGs), built and inserted by the wiring cell
     # via `deck.layers` (deforest's pattern), so a year / checkbox change
     # rebuilds the layer without destroying the Map. Tiles: what is cached
@@ -1558,7 +1480,11 @@ def _(
             noncrop=_NONCROP, dis_lut=_DIS_LUT, sel=(set(_sel) if _sel else None),
         )
         for key, png in zip(keys, pngs):
-            _tiles[key] = EncodedImage(data=png, media_type="image/png")
+            # a tile is stored under its OWN state only: a key of another
+            # state rendered by this closure would poison the cache (fields
+            # drawn with fields off, 2026-08-21 night)
+            if key[0] == _state:
+                _tiles[key] = EncodedImage(data=png, media_type="image/png")
         if len(_tiles) > TILE_CACHE:
             for _k in list(_tiles)[:TILE_CACHE // 4]:
                 _tiles.pop(_k, None)
@@ -1592,6 +1518,10 @@ def _(
             except Exception:
                 pass
             HOLD["last_line"] = line
+            # remembered per state: a rebuild served wholly from the tile
+            # cache runs no batch, and the status + legend would keep showing
+            # the previous state (the "still says fields" confusion)
+            HOLD.setdefault("last_by_state", {})[_state] = (json.dumps(legend), line)
             _say(line)
 
         _loop = HOLD.get("loop")
@@ -1600,7 +1530,7 @@ def _(
         else:
             _push()
 
-    def _view_tiles(z):
+    def _view_tiles(z, state=None):
         """Every tile of the current camera view at zoom z (deck's TileLayer
         caps in-flight requests at 6, so a 30-tile view would otherwise be
         five sequential batches; serving the whole view on the first request
@@ -1620,7 +1550,7 @@ def _(
         xs, ys = range(tx(W), tx(E) + 1), range(ty(N), ty(S) + 1)
         if len(xs) * len(ys) > 80:
             return set()
-        return {(_state, z, x, y) for x in xs for y in ys}
+        return {(state or _state, z, x, y) for x in xs for y in ys}
 
     def _make_raster():
         """A fresh RasterLayer (a NEW widget model each time: under marimo a
@@ -1662,17 +1592,36 @@ def _(
         HOLD["layer_state"] = _state
         deck.layers = []
         deck.layers = [HOLD["raster"]]
+        # the status + legend of the state we switch to (a batch, if one
+        # runs, overwrites them); or a plain line while the first batch runs
+        _last = HOLD.get("last_by_state", {}).get(_state)
+        if _last is not None:
+            try:
+                hud.widget.legend = _last[0]
+            except Exception:
+                pass
+            _say(_last[1] + " · from cache")
+        else:
+            _say(f"year {_year}"
+                 + (" · crops only" if _crops_only else "")
+                 + (f" · FTW {_fyear} fields" if _fields else "")
+                 + (" · disagreement" if _dis else "")
+                 + " · loading …")
 
     async def _run_batch(b):
         # the batch's future MUST resolve whatever happens: followers await
         # it, and a batch that is neither closed nor resolved would collect
-        # every later request of its zoom, forever
+        # every later request of its zoom, forever. Everything the batch
+        # needs is IN b (its serve closure, its view-tiles closure, its
+        # state): a name looked up here would be the NEWEST cell run's, and a
+        # batch from the previous layer would be served with the new flags
+        # under the old keys (the cache poisoning of 2026-08-21 night)
         try:
             await asyncio.sleep(BATCH_S)
             b["closed"] = True
-            b["keys"] |= {k for k in _view_tiles(b["z"]) if k not in _tiles}
+            b["keys"] |= {k for k in b["view"](b["z"], b["state"]) if k not in _tiles}
             keys = sorted(b["keys"])
-            await asyncio.get_running_loop().run_in_executor(None, _serve_batch, b["z"], keys)
+            await asyncio.get_running_loop().run_in_executor(None, b["serve"], b["z"], keys)
             if not b["fut"].done():
                 b["fut"].set_result(True)
         except asyncio.CancelledError:
@@ -1696,7 +1645,8 @@ def _(
         b = HOLD.get("batch")
         if b is None or b["closed"] or b["z"] != z or b["state"] != _state:
             b = {"z": z, "state": _state, "keys": set(), "closed": False,
-                 "fut": loop.create_future()}
+                 "fut": loop.create_future(),
+                 "serve": _serve_batch, "view": _view_tiles}
             # mark the exception retrieved even if every follower was cancelled
             b["fut"].add_done_callback(lambda f: f.cancelled() or f.exception())
             b["task"] = loop.create_task(_run_batch(b))
@@ -1727,6 +1677,19 @@ def _(
                 return
             HOLD["vs"] = vs
             HOLD["box"] = bbox4326(vs)
+            # the camera stays over CONUS (Stephen, 2026-08-21): a centre
+            # outside EXTENT (by a margin) is snapped back to the edge, once;
+            # the corrected view_state comes back through here inside the box
+            W0, S0, E0, N0 = EXTENT
+            M = 2.0
+            lon = min(max(vs["longitude"], W0 - M), E0 + M)
+            lat = min(max(vs["latitude"], S0 - M), N0 + M)
+            if (lon, lat) != (vs["longitude"], vs["latitude"]) and not HOLD.get("clamping"):
+                HOLD["clamping"] = True
+                try:
+                    deck.set_view_state(longitude=lon, latitude=lat)
+                finally:
+                    HOLD["clamping"] = False
         except Exception as _e:
             _say(f"camera error: {type(_e).__name__}: {_e}")
 
@@ -1919,6 +1882,10 @@ def _(
 
     if _act == "analyze":
         HOLD["atask"] = _spawn(_do_analyze())
+
+    if _act == "refresh":
+        # the refresh button: rebuilt below, in this run, like a toggle
+        HOLD["layer_state"] = None
 
     # ---- the search field: Photon, camera-biased, fly_to the first hit ------
     def _photon_first(query, vs):

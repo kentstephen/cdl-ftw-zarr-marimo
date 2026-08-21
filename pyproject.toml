@@ -1,12 +1,10 @@
 [project]
 name = "cdl-ftw-zarr-marimo"
 version = "0.1.0"
-description = "USDA Cropland Data Layer x Fields of the World: Zarr/icechunk read with xarray, drawn as tiles in lonboard under marimo, DuckDB for the per-field parquet joins"
+description = "USDA Cropland Data Layer x Fields of the World: Zarr/icechunk read with xarray, drawn as tiles in lonboard under marimo; the per-field parquet joins as DuckDB SQL in a second notebook"
 requires-python = ">=3.13"
 dependencies = [
     "marimo==0.23.16",
-    "xarray-sql[duckdb]==0.4.0rc1",
-    "duckdb>=1.5.5",
     "xarray",
     "zarr>=3",
     "icechunk",

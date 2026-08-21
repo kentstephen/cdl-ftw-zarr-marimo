@@ -1,5 +1,6 @@
-"""Two patches to lonboard's shipped JS: turn OFF deck's default lighting on
-the raster tile mesh, and raise the raster tile request timeout (10 s -> 120 s).
+"""Three patches to lonboard's shipped JS: turn OFF deck's default lighting on
+the raster tile mesh, raise the raster tile request timeout (10 s -> 120 s), and
+give each raster layer its own deck id under marimo (model_id is undefined there).
 
 lonboard 0.16 renders every RasterLayer tile through a mesh sub-layer whose
 fragment shader ends in `lighting_getLightColor(...)`: deck's default material
@@ -43,6 +44,30 @@ TIMEOUT_RE = re.compile(
     r"(tile:\{index:\{x:\w+,y:\w+,z:\w+\}\}\},\w+,\{signal:\w+,timeout:)1e4\b")
 TIMEOUT_NEW = r"\g<1>12e4"
 
+# Third patch (2026-08-21, night): the raster layer's deck id is
+# `${this.model.model_id}` and under marimo model_id is undefined, so EVERY
+# RasterLayer is deck layer "undefined": a rebuilt layer (year, checkbox, search)
+# reads to deck as an update of the same TileLayer, which keeps its loaded
+# tiles and only fetches the ones it lacks (the old state stayed on screen in
+# bands; the remove-then-add in one cell run does not reach deck as two steps).
+# With model_id missing, each JS layer instance gets its own random id, so a
+# rebuild is a new TileLayer and the old one is finalised.
+# And a per-instance `updateTriggers.getTileData`: deck's TileLayer reloads
+# EVERY tile when that trigger changes (updateState -> tileset.reloadAll()), so
+# a rebuilt layer refetches through its own getTileData even if deck matches
+# it to the old one by id (a click on fields at the home view changed nothing
+# until a zoom, 2026-08-21). NOT via `data`: a string data is a URL that
+# deck's base layer fetches.
+ID_OLD = "layerProps(){return{id:`${this.model.model_id}`,data:null,"
+ID_MID = ("layerProps(){return{id:`${this.model.model_id??(this._lbid??="
+          "Math.random().toString(36).slice(2))}`,data:null,")
+ID_BAD = ("layerProps(){return{id:`${this.model.model_id??(this._lbid??="
+          "Math.random().toString(36).slice(2))}`,"
+          "data:(this._lbid??=Math.random().toString(36).slice(2)),")
+ID_NEW = ("layerProps(){return{id:`${this.model.model_id??(this._lbid??="
+          "Math.random().toString(36).slice(2))}`,data:null,"
+          "updateTriggers:{getTileData:(this._lbid??=Math.random().toString(36).slice(2))},")
+
 
 def main() -> int:
     js = Path(lonboard.__file__).parent / "static" / "index.js"
@@ -68,6 +93,20 @@ def main() -> int:
         print("tile timeout: already patched")
     else:
         print("tile timeout: getTileData request not found (bundle changed; update TIMEOUT_RE)")
+        return 1
+    if ID_NEW in out:
+        print("raster layer id + updateTriggers: already patched")
+    elif ID_BAD in out:
+        out = out.replace(ID_BAD, ID_NEW)
+        print("raster layer: data token -> updateTriggers.getTileData (a string data is a URL to deck)")
+    elif ID_MID in out:
+        out = out.replace(ID_MID, ID_NEW)
+        print("raster layer updateTriggers: per instance (id patch was already in)")
+    elif ID_OLD in out:
+        out = out.replace(ID_OLD, ID_NEW)
+        print("raster layer id + updateTriggers: per instance")
+    else:
+        print("raster layer id: layerProps not found (bundle changed; update ID_OLD)")
         return 1
     if out == src:
         print(f"already patched: {js}")

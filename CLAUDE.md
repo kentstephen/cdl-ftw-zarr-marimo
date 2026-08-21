@@ -6,7 +6,7 @@ colorblind-safe encodings: Stephen has trouble seeing red).
 
 ## What this is
 
-`cdl-ftw.py`, the map notebook (and `cdl-ftw-sql.py`, the joins as SQL): USDA Cropland Data Layer (icechunk Zarr v3,
+`cdl-ftw.py`, one marimo notebook: USDA Cropland Data Layer (icechunk Zarr v3,
 `s3://us-west-2.opendata.source.coop/chill/usda-cropland-data-layer/v0.1.0.icechunk`,
 30 m 2008-2025 + 10 m 2024-2025, majority pyramids) x Fields of the World
 (`tge-labs/ftw-global-data` on the same bucket: P(field) Zarr at 10 m + pyramid,
@@ -25,36 +25,47 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   and the PNG. No DuckDB, no xarray-sql on this path. It used to go through
   DuckDB rows and back; that was a detour (a per-query ~0.2 s fixed overhead on
   the xql table and an array -> rows -> array round trip).
-- **DuckDB is for the vector joins**: the parquet through httpfs + the
-  `cache_httpfs` community extension (byte ranges kept on disk under the OS tmp
-  dir), `ST_Contains`, per-field crop / purity, the 2x2. Those are
-  `cdl-ftw-sql.py`, its OWN notebook since 2026-08-21 (Stephen: "everything
-  under this its own notebook"): a box you type (W, S, E, N; the map's opening
-  view by default), FTW's year, a button; `xarray-sql` (`xql.register`) exposes
-  the CDL 10 m levels and `ftw_4` as tables there. The map notebook still opens
-  a DuckDB connection and registers the xql tables, but nothing in it reads
-  them any more (`to5070`, `ftw_files` are unused too): Stephen's call whether
-  DuckDB / xarray-sql leave the map notebook.
+- **No DuckDB in the map notebook** (2026-08-21, Stephen: "i want to run xarray
+  numpy and lonboard"). The per-field joins as SQL (the fiboa parquet through
+  httpfs + `cache_httpfs`, `ST_Contains`, per-field crop / purity, the 2x2,
+  `xarray-sql` exposing the CDL 10 m levels and `ftw_4` as tables) live in
+  `cdl-ftw-sql.py`, which is GITIGNORED and out of the repo for now (his call);
+  it carries its own inline deps, run it with `--sandbox`. `duckdb` and
+  `xarray-sql` are out of pyproject.
 - The map is **tiles**: lonboard `RasterLayer` (deck TileLayer), `_fetch_tile`
   batches a burst of requests (BATCH_S 0.05), serves the WHOLE VIEW per batch
   (deck caps in-flight tile requests at 6), cuts the PNGs per tile from one
   grid, caches tiles in memory (TILE_CACHE). A state change (year, checkboxes,
   crops-only, selection) rebuilds the layer, REMOVE THEN ADD via `deck.layers`
-  (under marimo every lonboard layer has id `undefined`; a direct replacement
-  reads to deck as an update and it keeps its loaded tiles). The TMS must carry
+  (the lonboard JS patch gives each raster layer its own deck id; without it
+  every layer under marimo is deck layer "undefined", a replacement reads as
+  an update and it keeps its loaded tiles: the old state stayed on screen in
+  bands, 2026-08-21 night, with remove-then-add in one run not reaching deck
+  as two steps). The TMS must carry
   a `boundingBox` (morecantile's stock WebMercatorQuad lacks one); the TMS-less
   path in lonboard 0.16 is dead code (`getTileData` returns null).
-- **The lonboard JS patch is REQUIRED** (`tools/patch_lonboard_raster_unlit.py`,
-  two replacements; re-run after any install, never `--sandbox`; then restart
-  the kernel: anywidget reads the JS into the Map's `_esm` when the Map is
-  created, a browser reload changes nothing): (1) the tile mesh fragment shader calls
+- **The lonboard JS patch is REQUIRED and the notebook applies it itself**: the
+  first cell runs `tools/patch_lonboard_raster_unlit.py` (three replacements)
+  in whatever environment is executing the notebook, before the Map is created
+  (anywidget reads the JS into the Map's `_esm` at creation). THE TRAP OF
+  2026-08-21: Stephen runs `uv run marimo edit cdl-ftw.py --sandbox`; the sandbox
+  is a fresh uv env from the inline deps, which had `lonboard>=0.16.0` with no
+  cap, so it resolved lonboard 0.17.0b1, unpatched, while every headless check
+  ran in the patched `.venv` (0.16). Stale tiles on every toggle, blank after a
+  flight, 10 s drops: all of it was the unpatched JS in his kernel. Inline deps
+  now pin `lonboard>=0.16.0,<0.17` + ipywidgets/traitlets like pyproject. Before
+  theorising about a session, `ps -axo command | grep marimo` and look at the
+  interpreter path. The three edits: (1) the tile mesh fragment shader calls
   `lighting_getLightColor`, ~0.69x on every channel, `opacity` ignored, no
   Python prop reaches it; without it the colours are wrong (a protan-safe
   palette drawn dark). (2) `getTileData` gives the kernel TEN SECONDS per tile
   request (`timeout:1e4`); past that the JS drops the tile and deck never asks
   again, so a batch over 10 s (a fly-to into a cold region) left the map blank
   until a param change rebuilt the layer (2026-08-21, Champaign). Raised to
-  120 s. Keep batches short anyway: the status line's ms is the number.
+  120 s. Keep batches short anyway: the status line's ms is the number. (3)
+  the raster layer's deck id is `${this.model.model_id}`, undefined under
+  marimo, so every RasterLayer was deck layer "undefined" and a rebuild kept
+  the old tiles; patched to a per-instance id when model_id is missing.
 
 ## Things that cost a round trip (keep)
 
@@ -116,6 +127,15 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   the map is ever blank while the status shows batches, check the TMS first.
 - Verified 2026-08-20 night in this venv: TMS with boundingBox + the unlit
   patch -> tile colours equal the reference (255 -> 255, 150 -> 152).
+
+- HUD `refresh` button (act "refresh"): `HOLD["layer_state"] = None` in the run,
+  i.e. a rebuild like a toggle, the escape hatch if deck stalls. `TILE_ZMIN` 3.
+  The camera is clamped to EXTENT + 2 deg in `_on_vs` via `deck.set_view_state`
+  (guarded by HOLD["clamping"]). Stephen, 2026-08-21 evening.
+- With fields on below ~z9 the coarse P(field) (64x / 256x, >= 0.5) keeps almost
+  nothing (z6: 55 px drawn of 6.8 M) and the batch is slow (1.5 s): "clip at
+  every zoom" is a blank at low zoom. Not changed; his call (a clip floor was
+  offered).
 
 ## Open
 

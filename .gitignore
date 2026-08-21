@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 __marimo__/
 .cache/
+cdl-ftw-sql.py
