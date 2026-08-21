@@ -262,7 +262,10 @@ def _():
     # the PNGs cut per tile from the shared grid. Tiles cached in memory.
     BATCH_S = 0.05                # how long the first request of a burst waits
     TILE_CACHE = 3000             # PNG tiles kept (~20-40 KB each)
-    TILE_ZMIN, TILE_ZMAX = 3, 15   # z3: no continental tiles (Stephen, 2026-08-21)
+    TILE_ZMIN, TILE_ZMAX = 3, 15   # tiles: none below z3 (Stephen, 2026-08-21)
+    VIEW_ZMIN = 3.0                # camera: the clamp in _on_vs snaps the zoom back
+    # (lonboard 0.16's Map has no controller zoom bound; the layer's min_zoom
+    # only stops tile requests, he could still zoom way out)
     EXTENT = [-125.0, 24.0, -66.5, 49.8]   # CONUS: no tile requests outside it
     FTW_TILE_ZMAX = 13            # the per-state PMTiles' top zoom (outlines)
     OUTLINE_ZMIN = 12             # outlines drawn from this tile zoom up (a z5
@@ -307,6 +310,7 @@ def _():
         TILE_PX,
         TILE_ZMAX,
         TILE_ZMIN,
+        VIEW_ZMIN,
         BATCH_S,
         EXTENT,
         VIEW_H,
@@ -1684,10 +1688,12 @@ def _(
             M = 2.0
             lon = min(max(vs["longitude"], W0 - M), E0 + M)
             lat = min(max(vs["latitude"], S0 - M), N0 + M)
-            if (lon, lat) != (vs["longitude"], vs["latitude"]) and not HOLD.get("clamping"):
+            zoom = max(vs["zoom"], VIEW_ZMIN)
+            if ((lon, lat, zoom) != (vs["longitude"], vs["latitude"], vs["zoom"])
+                    and not HOLD.get("clamping")):
                 HOLD["clamping"] = True
                 try:
-                    deck.set_view_state(longitude=lon, latitude=lat)
+                    deck.set_view_state(longitude=lon, latitude=lat, zoom=zoom)
                 finally:
                     HOLD["clamping"] = False
         except Exception as _e:

@@ -11,15 +11,17 @@ xarray + numpy + lonboard, nothing else on the map path.
   TileLayer asks for z/x/y, the kernel answers 256 px PNGs, one read per batch of
   tiles, the FTW clip / disagreement decided per output pixel, field outlines from
   FTW's per-state PMTiles. Tiles cached in memory, FTW mask chunks on disk.
-- No DuckDB in the map notebook (since 2026-08-21). The per-field joins (the
-  fiboa GeoParquet over httpfs, `ST_Contains` of pixel centres into field
-  polygons, per-field majority crop and purity, the CDL x FTW 2x2) were moved
-  to a second notebook that is kept out of the repo for now.
+- No DuckDB on the map path (since 2026-08-21): xarray + numpy + lonboard only.
 - Two checkboxes: **fields** (pixels clipped to P(field) >= 0.5, outlines from
   z12) and **disagreement** (CDL crop / non-crop x FTW field / no field;
   2024-2025 only); a year strip, crops-only, a legend that isolates a class on
   click, "analyze what's in view", a place search (Photon), and a refresh
   button that rebuilds the tile layer.
+
+Data:
+
+- CDL: <https://source.coop/chill/usda-cropland-data-layer>
+- Fields of the World: <https://source.coop/ftw/global-data>
 
 Run:
 
