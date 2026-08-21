@@ -6,7 +6,7 @@ colorblind-safe encodings: Stephen has trouble seeing red).
 
 ## What this is
 
-`cdl-ftw.py`, one marimo notebook: USDA Cropland Data Layer (icechunk Zarr v3,
+`cdl-ftw.py`, the map notebook (and `cdl-ftw-sql.py`, the joins as SQL): USDA Cropland Data Layer (icechunk Zarr v3,
 `s3://us-west-2.opendata.source.coop/chill/usda-cropland-data-layer/v0.1.0.icechunk`,
 30 m 2008-2025 + 10 m 2024-2025, majority pyramids) x Fields of the World
 (`tge-labs/ftw-global-data` on the same bucket: P(field) Zarr at 10 m + pyramid,
@@ -27,9 +27,14 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   the xql table and an array -> rows -> array round trip).
 - **DuckDB is for the vector joins**: the parquet through httpfs + the
   `cache_httpfs` community extension (byte ranges kept on disk under the OS tmp
-  dir), `ST_Contains`, per-field crop / purity, the 2x2. Those are the SQL cells
-  under the map. `xarray-sql` (`xql.register`) is still used there to expose the
-  CDL 10 m levels as tables for the pixel -> field join.
+  dir), `ST_Contains`, per-field crop / purity, the 2x2. Those are
+  `cdl-ftw-sql.py`, its OWN notebook since 2026-08-21 (Stephen: "everything
+  under this its own notebook"): a box you type (W, S, E, N; the map's opening
+  view by default), FTW's year, a button; `xarray-sql` (`xql.register`) exposes
+  the CDL 10 m levels and `ftw_4` as tables there. The map notebook still opens
+  a DuckDB connection and registers the xql tables, but nothing in it reads
+  them any more (`to5070`, `ftw_files` are unused too): Stephen's call whether
+  DuckDB / xarray-sql leave the map notebook.
 - The map is **tiles**: lonboard `RasterLayer` (deck TileLayer), `_fetch_tile`
   batches a burst of requests (BATCH_S 0.05), serves the WHOLE VIEW per batch
   (deck caps in-flight tile requests at 6), cuts the PNGs per tile from one
