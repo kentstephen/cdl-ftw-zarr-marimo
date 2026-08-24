@@ -18,10 +18,22 @@ xarray + numpy + lonboard, nothing else on the map path.
   click, "analyze what's in view", a place search (Photon), and a refresh
   button that rebuilds the tile layer.
 
+A second notebook, `aef-similarity.py` (branch work, 2026-08-24): click a field
+and the view repaints as cosine similarity to it in the **AlphaEarth
+Foundations** embeddings (64-dim annual vectors at 10 m, 2017-2025, the
+`tge-labs/aef-mosaic` Zarr on the same bucket). The click flood-fills the FTW
+P(field) grid into the field's pixels and averages their AEF vectors into one
+unit reference; similarity renders as viridis tiles through the same serve
+machinery, FTW outlines on top. The mosaic has no pyramid, so similarity lives
+from camera ~z12. The click is not lonboard's `on_click` (never worked under
+marimo): the HUD's JS catches canvas clicks and the kernel unprojects them.
+First step toward the AEF x FTW x CDL agreement map.
+
 Data:
 
 - CDL: <https://source.coop/chill/usda-cropland-data-layer>
 - Fields of the World: <https://source.coop/ftw/global-data>
+- AlphaEarth Foundations mosaic: <https://source.coop/tge-labs/aef-mosaic>
 
 Run:
 
