@@ -5,3 +5,4 @@ __pycache__/
 __marimo__/
 .cache/
 cdl-ftw-sql.py
+.claude/memory/
