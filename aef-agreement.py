@@ -154,11 +154,12 @@ def _(mo):
 
     **Every field in view is scored by one question: do the fields whose year
     looked most like yours (AlphaEarth embeddings) grow what CDL says you
-    grow?** Dark = yes, the two datasets tell the same story. **Bright
-    yellow = no**: this field's ten nearest look-alikes carry a different CDL
-    label, so either CDL is wrong here (mislabel, young orchard) or the field
-    truly had a different year than its label suggests. Bright fields are the
-    interesting ones; the map is a **surprise detector** over three datasets
+    grow?** The ramp is diverging: **purple = yes**, the two datasets tell
+    the same story; pale = borderline; **orange = no**: this field's ten
+    nearest look-alikes carry a different CDL label, so either CDL is wrong
+    here (mislabel, young orchard) or the field truly had a different year
+    than its label suggests. Orange fields are the interesting ones; the
+    map is a **surprise detector** over three datasets
     that have never met (AlphaEarth = raw satellite story, CDL = USDA's
     labels, FTW = where the fields are).
 
@@ -397,17 +398,22 @@ def _(MARGIN, VIEW_H, VIEW_W, math, np):
         return (max(float(X.min()), _X0), max(float(Y.min()), _Y0),
                 min(float(X.max()), _X1), min(float(Y.max()), _Y1))
 
-    _VIR = np.array([
-        (68, 1, 84), (72, 26, 108), (71, 47, 125), (65, 68, 135),
-        (57, 86, 140), (49, 104, 142), (42, 120, 142), (35, 136, 142),
-        (31, 152, 139), (34, 168, 132), (53, 183, 121), (84, 197, 104),
-        (122, 209, 81), (165, 219, 54), (210, 226, 27), (253, 231, 37),
+    # AGREEMENT is two-poled with a meaningful middle, so the ramp is
+    # DIVERGING, not sequential (Stephen, 2026-08-24: "why would yellow be
+    # disagreement"). ColorBrewer PuOr, protan-safe (orange vs purple, no
+    # red-green leg): index 0 = DISAGREES (strong orange, the alarm), 128 =
+    # borderline (pale, fades against the light basemap), 255 = AGREES
+    # (deep purple, calm).
+    _PUOR = np.array([
+        (179, 88, 6), (224, 130, 20), (253, 184, 99), (254, 224, 182),
+        (247, 247, 247),
+        (216, 218, 235), (178, 171, 210), (128, 115, 172), (84, 39, 136),
     ], dtype=np.float64)
     _t = np.linspace(0, 1, 256)
-    _a = np.linspace(0, 1, len(_VIR))
-    VIRIDIS = np.stack([np.interp(_t, _a, _VIR[:, i]) for i in range(3)],
-                       axis=1).astype(np.uint8)
-    return VIRIDIS, albers_box, albers_xy, bbox4326, tile_box, unproject
+    _a = np.linspace(0, 1, len(_PUOR))
+    AGREE_LUT = np.stack([np.interp(_t, _a, _PUOR[:, i]) for i in range(3)],
+                         axis=1).astype(np.uint8)
+    return AGREE_LUT, albers_box, albers_xy, bbox4326, tile_box, unproject
 
 
 @app.cell
@@ -935,7 +941,7 @@ def _(
     TILE_ZMAX,
     VIEW_W,
     VIEW_ZMIN,
-    VIRIDIS,
+    AGREE_LUT,
     YEAR0,
     albers_box,
     albers_xy,
@@ -1220,14 +1226,15 @@ def _(
         latm = math.radians((S + N) / 2)
         pxa = ((FTW_RES * 111.32 * math.cos(latm))
                * (FTW_RES * 110.574)) * ACRES_PER_KM2
-        # the paint LUT: surprise = 1 - agreement through viridis; the rest
-        # faint grey; nothing at label 0
+        # the paint LUT: agreement through the DIVERGING ramp (orange =
+        # disagrees, pale = borderline, purple = agrees); the rest faint
+        # grey; nothing at label 0
         rgba = np.zeros((nlab + 1, 4), dtype=np.uint8)
         rgba[1:, :3] = 150
         rgba[1:, 3] = 45
         if len(ids):
-            idx = (np.clip(1.0 - agree[ids], 0, 1) * 255).astype(np.uint8)
-            rgba[ids, :3] = VIRIDIS[idx]
+            idx = (np.clip(agree[ids], 0, 1) * 255).astype(np.uint8)
+            rgba[ids, :3] = AGREE_LUT[idx]
             rgba[ids, 3] = 220
         return {"lab": lab, "fx0": fx0, "fy0": fy0, "maj": maj,
                 "agree": agree, "sizes": sizes, "crop_px": crop_px,
@@ -1402,11 +1409,11 @@ def _(
     def _legend_html():
         stops = ", ".join(f"rgb({r},{g},{b}) {i / 15 * 100:.0f}%"
                           for i, (r, g, b) in enumerate(
-                              VIRIDIS[np.linspace(0, 255, 16).astype(int)]))
+                              AGREE_LUT[np.linspace(0, 255, 16).astype(int)]))
         bar = (f'<span style="display:inline-block;width:9rem;height:10px;'
                f'border-radius:3px;background:linear-gradient(90deg,{stops})"></span>')
-        return (f'<span style="opacity:.8">agrees</span>{bar}'
-                f'<span style="opacity:.8">disagrees</span>'
+        return (f'<span style="opacity:.8">disagrees</span>{bar}'
+                f'<span style="opacity:.8">agrees</span>'
                 f'<span style="opacity:.6">with its {K_NBR} look-alikes · '
                 f'click a field for its story</span>')
 
