@@ -749,6 +749,14 @@ def _(anywidget, traitlets):
           const yv = document.createElement("span");
           yv.style.cssText = "font-weight:600;font-variant-numeric:tabular-nums";
           yv.textContent = range.value;
+          const labC = document.createElement("label");
+          labC.style.cssText =
+            "display:inline-flex;align-items:center;gap:.35rem;cursor:pointer";
+          const cdl = document.createElement("input");
+          cdl.type = "checkbox"; cdl.checked = false;
+          labC.appendChild(cdl);
+          labC.appendChild(document.createTextNode("show CDL"));
+          labC.title = "color the fields by their CDL crop instead of the score";
           const rfr = document.createElement("button");
           rfr.textContent = "refresh";
           rfr.title = "rebuild the tile layer";
@@ -769,7 +777,7 @@ def _(anywidget, traitlets):
           };
           model.on("change:legend", renderLegend);
           renderLegend();
-          box.append(yl, range, yv, rfr, search, legendBox);
+          box.append(yl, range, yv, labC, rfr, search, legendBox);
           const status = document.createElement("div");
           status.style.cssText =
             "font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;" +
@@ -821,7 +829,8 @@ def _(anywidget, traitlets):
           let seq = 0, deb = null;
           const send = (act, extra) => {
             model.set("ctl", JSON.stringify(Object.assign({
-              act: act, year: +range.value, n: ++seq }, extra || {})));
+              act: act, year: +range.value, cdl: cdl.checked,
+              n: ++seq }, extra || {})));
             model.save_changes();
           };
           const commit = () => {
@@ -830,6 +839,7 @@ def _(anywidget, traitlets):
           };
           range.addEventListener("input", () => { yv.textContent = range.value; });
           range.addEventListener("change", commit);
+          cdl.addEventListener("change", commit);
           rfr.addEventListener("click", () => send("refresh"));
           search.addEventListener("keydown", (e) => {
             const q = search.value.trim();
@@ -980,10 +990,15 @@ def _(
     _year = int(_c.get("year", YEAR0))
     if _year not in AEF_YEARS:
         _year = YEAR0
+    _cdl_mode = bool(_c.get("cdl", False))
     _act = _c.get("act", "set")
     _q = str(_c.get("q", "")).strip()
     _NONCROP = np.zeros(256, dtype=bool)
     _NONCROP[[0, 81, *NONCROP_CODES]] = True
+    _CLASS_RGB = np.full((256, 3), 136, dtype=np.uint8)
+    for _cc, (_nm2, _hx2, _nc2) in CLASSES.items():
+        _CLASS_RGB[_cc] = (int(_hx2[1:3], 16), int(_hx2[3:5], 16),
+                           int(_hx2[5:7], 16))
 
     try:
         HOLD["loop"] = asyncio.get_running_loop()
@@ -1177,8 +1192,18 @@ def _(
     def _field_table(year, W, S, E, N):
         """Label the FTW fields over the box, give each its mean AEF vector
         and CDL majority, score each crop field by its K nearest look-alikes.
-        Returns the dict the tiles, the panel and the click all read."""
+        Returns the dict the tiles, the panel and the click all read.
+        CACHED by the chunk-aligned box: a toggle or a same-box zoom pays
+        nothing (Stephen, 2026-08-24 night: toggling must not recompute)."""
         fyear = year if year in FTW_YEARS else FTW_YEARS[0]
+        _ck = (year, int(math.floor((W + 180.0) / FTW_RES)) // _CH,
+               int(math.floor((E + 180.0) / FTW_RES)) // _CH,
+               int(math.floor((FTW_Y0 - N) / FTW_RES)) // _CH,
+               int(math.floor((FTW_Y0 - S) / FTW_RES)) // _CH)
+        _fc = HOLD.setdefault("ftab_cache", {})
+        hitft = _fc.get(_ck)
+        if hitft is not None:
+            return hitft
         mask, fx0, fy0 = _ftw10(fyear, W, S, E, N)
         lab, nlab = ndimage.label(mask)
         lab = lab.astype(np.int32)
@@ -1249,18 +1274,28 @@ def _(
         rgba = np.zeros((nlab + 1, 4), dtype=np.uint8)
         rgba[1:, :3] = 150
         rgba[1:, 3] = 45
+        rgba_cdl = rgba.copy()
         if len(ids):
             idx = (np.clip(agree[ids], 0, 1) * 255).astype(np.uint8)
             rgba[ids, :3] = AGREE_LUT[idx]
             rgba[ids, 3] = 220
-        return {"lab": lab, "fx0": fx0, "fy0": fy0, "maj": maj,
-                "agree": agree, "sizes": sizes, "crop_px": crop_px,
-                "crop_tot": crop_tot, "kept": kept, "nbr": nbr_tally,
-                "pxa": pxa, "rgba": rgba, "fyear": fyear, "year": year,
-                "nfields": int(len(ids))}
+            # the CDL view: the same fields by their majority crop's colour
+            # (the store's palette, red-dominant classes remapped)
+            rgba_cdl[ids, :3] = _CLASS_RGB[maj[ids]]
+            rgba_cdl[ids, 3] = 220
+        ft = {"lab": lab, "fx0": fx0, "fy0": fy0, "maj": maj,
+              "agree": agree, "sizes": sizes, "crop_px": crop_px,
+              "crop_tot": crop_tot, "kept": kept, "nbr": nbr_tally,
+              "pxa": pxa, "rgba": rgba, "rgba_cdl": rgba_cdl,
+              "fyear": fyear, "year": year, "nfields": int(len(ids))}
+        _fc[_ck] = ft
+        if len(_fc) > 6:
+            for _k in list(_fc)[:2]:
+                _fc.pop(_k, None)
+        return ft
 
     # ---- state + tile serve -------------------------------------------------
-    _state = (_year,)
+    _state = (_year, _cdl_mode)
     _tiles = HOLD.setdefault("tiles", {})
 
     def _states_in(W, S, E, N):
@@ -1268,6 +1303,18 @@ def _(
                 if xmax > W and xmin < E and ymax > S and ymin < N]
 
     def _panel_html(ft):
+        if _cdl_mode:
+            # the CDL view: what grows in view, by acres
+            ids = np.flatnonzero(ft["kept"])
+            if not len(ids):
+                return "no crop fields in view"
+            ac = np.bincount(ft["maj"][ids], weights=ft["sizes"][ids],
+                             minlength=256) * ft["pxa"]
+            order = [int(c) for c in np.argsort(-ac) if ac[c] > 0][:8]
+            parts = [f"{_chip(_cname(c)[1])}{_cname(c)[0]} {ac[c] / 1e3:,.1f}k ac"
+                     for c in order]
+            return (f"<b>CDL {ft['year']} in view</b> (each field its "
+                    f"majority crop): " + " · ".join(parts))
         rows = []
         ids = np.flatnonzero(ft["kept"] & np.isfinite(ft["agree"]))
         if len(ids):
@@ -1335,7 +1382,7 @@ def _(
                     & (jy >= 0) & (jy < ft["lab"].shape[0])
                 lt = np.zeros((TILE_PX, TILE_PX), dtype=np.int32)
                 lt[okt] = ft["lab"][jy[okt], jx[okt]]
-                out[:] = ft["rgba"][lt]
+                out[:] = ft["rgba_cdl" if _cdl_mode else "rgba"][lt]
             img = Image.fromarray(out, "RGBA")
             if rings:
                 hit = np.flatnonzero((rb[:, 0] < tE) & (rb[:, 2] > tW)
@@ -1423,6 +1470,10 @@ def _(
         )
 
     def _legend_html():
+        if _cdl_mode:
+            return ('<span style="opacity:.7">fields coloured by their CDL '
+                    'majority crop (the panel lists them) · untick to see '
+                    'the agreement score</span>')
         stops = ", ".join(f"rgb({r},{g},{b}) {i / 15 * 100:.0f}%"
                           for i, (r, g, b) in enumerate(
                               AGREE_LUT[np.linspace(0, 255, 16).astype(int)]))
