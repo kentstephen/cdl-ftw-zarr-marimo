@@ -152,22 +152,31 @@ def _(mo):
     mo.md("""
     # The agreement map
 
-    **Every field in view is scored by one question: do the fields whose year
-    looked most like yours (AlphaEarth embeddings) grow what CDL says you
-    grow?** The ramp is diverging: **purple = yes**, the two datasets tell
-    the same story; pale = borderline; **orange = no**: this field's ten
-    nearest look-alikes carry a different CDL label, so either CDL is wrong
-    here (mislabel, young orchard) or the field truly had a different year
-    than its label suggests. Orange fields are the interesting ones; the
-    map is a **surprise detector** over three datasets
-    that have never met (AlphaEarth = raw satellite story, CDL = USDA's
-    labels, FTW = where the fields are).
+    **What you are looking at.** Every field on screen gets one score, from
+    one question. Take the field's AlphaEarth fingerprint (64 numbers
+    summarizing its whole year as the satellites saw it), find the **10
+    fields in view whose year looked most like it**, and check their crop
+    labels in CDL: **how many of the 10 grow what CDL says THIS field
+    grows?** That fraction is the color:
 
-    Zoom to farmland (paint from camera ~z12), read the panel (the most
-    surprising fields in view), **click any field for its story**: what CDL
-    calls it, and what its look-alikes are. Non-crop and tiny fields sit out
-    in faint grey. The look-alike pool is the fields on screen, so the score
-    is local and recomputes as you move.
+    - **Bright yellow = 10/10.** Everything checks out: the field looks
+      like its label. Three datasets that have never met (AlphaEarth = raw
+      satellite story, CDL = USDA's labels, FTW = where the fields are)
+      tell one story. Most of the map should be bright; that is the two
+      datasets corroborating each other.
+    - **Dark purple = 0/10.** This field's look-alikes all grow something
+      ELSE. Either CDL is wrong here (a mislabel, a just-planted orchard
+      still filed under its old crop), or the field genuinely had a
+      different year than its label implies (failed, fallow, double-crop).
+      **The dark fields are the leads**: each one is a specific place where
+      somebody's data is wrong in an interesting way.
+    - **Faint grey** sits out: too small, or not cropland per CDL.
+
+    The panel under the map always shows the count, the median score, and
+    the worst offenders in view (what CDL calls them vs what their
+    look-alikes grow). **Click any field** to get its story. Paint from
+    camera ~z12; the look-alike pool is the fields on screen, so scores are
+    local and recompute as you move.
     """)
     return
 
@@ -398,20 +407,19 @@ def _(MARGIN, VIEW_H, VIEW_W, math, np):
         return (max(float(X.min()), _X0), max(float(Y.min()), _Y0),
                 min(float(X.max()), _X1), min(float(Y.max()), _Y1))
 
-    # AGREEMENT is two-poled with a meaningful middle, so the ramp is
-    # DIVERGING, not sequential (Stephen, 2026-08-24: "why would yellow be
-    # disagreement"). ColorBrewer PuOr, protan-safe (orange vs purple, no
-    # red-green leg): index 0 = DISAGREES (strong orange, the alarm), 128 =
-    # borderline (pale, fades against the light basemap), 255 = AGREES
-    # (deep purple, calm).
-    _PUOR = np.array([
-        (179, 88, 6), (224, 130, 20), (253, 184, 99), (254, 224, 182),
-        (247, 247, 247),
-        (216, 218, 235), (178, 171, 210), (128, 115, 172), (84, 39, 136),
+    # the ramp (Stephen, 2026-08-24, after a PuOr diverging detour): viridis,
+    # BRIGHT = HIGH agreement (the datasets corroborate each other), DARK =
+    # low (someone is wrong here; the dark fields are the leads). Index 0 =
+    # 0% agreement, 255 = 100%.
+    _VIR = np.array([
+        (68, 1, 84), (72, 26, 108), (71, 47, 125), (65, 68, 135),
+        (57, 86, 140), (49, 104, 142), (42, 120, 142), (35, 136, 142),
+        (31, 152, 139), (34, 168, 132), (53, 183, 121), (84, 197, 104),
+        (122, 209, 81), (165, 219, 54), (210, 226, 27), (253, 231, 37),
     ], dtype=np.float64)
     _t = np.linspace(0, 1, 256)
-    _a = np.linspace(0, 1, len(_PUOR))
-    AGREE_LUT = np.stack([np.interp(_t, _a, _PUOR[:, i]) for i in range(3)],
+    _a = np.linspace(0, 1, len(_VIR))
+    AGREE_LUT = np.stack([np.interp(_t, _a, _VIR[:, i]) for i in range(3)],
                          axis=1).astype(np.uint8)
     return AGREE_LUT, albers_box, albers_xy, bbox4326, tile_box, unproject
 
@@ -1236,9 +1244,8 @@ def _(
         latm = math.radians((S + N) / 2)
         pxa = ((FTW_RES * 111.32 * math.cos(latm))
                * (FTW_RES * 110.574)) * ACRES_PER_KM2
-        # the paint LUT: agreement through the DIVERGING ramp (orange =
-        # disagrees, pale = borderline, purple = agrees); the rest faint
-        # grey; nothing at label 0
+        # the paint LUT: agreement through viridis (bright = agrees, dark =
+        # low agreement, the leads); the rest faint grey; nothing at label 0
         rgba = np.zeros((nlab + 1, 4), dtype=np.uint8)
         rgba[1:, :3] = 150
         rgba[1:, 3] = 45
@@ -1280,15 +1287,14 @@ def _(
                 if len(rows) >= 4:
                     break
             med = float(np.nanmedian(ft["agree"][ids]))
-            head = (f"<b>{ft['nfields']} crop fields in view</b> · median "
-                    f"agreement {100 * med:.0f}% "
-                    f'<span style="opacity:.6">(of each field\'s {K_NBR} '
-                    f"nearest AlphaEarth look-alikes on screen, how many "
-                    f"carry its CDL label)</span>")
-            body = ("<div style='margin-top:2px'>most surprising: "
-                    + " · ".join(rows) + "</div>") if rows else \
-                   ("<div style='margin-top:2px;opacity:.6'>no strong "
-                    "disagreements in view</div>")
+            head = (f"<b>{ft['nfields']} fields scored</b> · each: of the "
+                    f"{K_NBR} fields in view that look most like it "
+                    f"(AlphaEarth), how many grow its CDL crop? · median "
+                    f"{100 * med:.0f}%")
+            body = ("<div style='margin-top:2px'><b>the dark fields "
+                    "(leads):</b> " + " · ".join(rows) + "</div>") if rows else \
+                   ("<div style='margin-top:2px;opacity:.6'>no dark fields: "
+                    "AlphaEarth and CDL agree everywhere in view</div>")
             return head + body
         return "no crop fields in view"
 
@@ -1424,7 +1430,8 @@ def _(
                f'border-radius:3px;background:linear-gradient(90deg,{stops})"></span>')
         return (f'<span style="opacity:.8">disagrees</span>{bar}'
                 f'<span style="opacity:.8">agrees</span>'
-                f'<span style="opacity:.6">with its {K_NBR} look-alikes · '
+                f'<span style="opacity:.6">bright = its look-alikes grow what '
+                f'CDL says it grows · dark = they don\'t (a lead) · '
                 f'click a field for its story</span>')
 
     def _rebuild():
