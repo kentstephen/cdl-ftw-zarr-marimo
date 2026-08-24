@@ -1004,7 +1004,7 @@ def _(
     _DQ[(np.arange(-128, 128) & 0xFF)] = (np.abs(_qv) / 127.5) ** 2 * np.sign(_qv)
     _DQ[128] = 0.0   # nodata -128 -> 0 weight here (valid tracked separately)
 
-    def _aef_fetch(year, missing):
+    def _aef_fetch(year, missing, needed):
         mem = HOLD.setdefault("aef_chunks", {})
         mx0, mx1 = min(c[0] for c in missing), max(c[0] for c in missing)
         my0, my1 = min(c[1] for c in missing), max(c[1] for c in missing)
@@ -1029,24 +1029,34 @@ def _(
                 except Exception:
                     pass
         if len(mem) > AEF_MEM_CHUNKS:
-            for _k in list(mem)[:AEF_MEM_CHUNKS // 4]:
+            # NEVER evict what the current request needs: an eviction here
+            # once dropped a chunk the caller had just checked off as
+            # present, and every batch in the area died on the KeyError
+            # until a restart ("nothing happens when I move around",
+            # 2026-08-24 night; the cap only trips after real panning,
+            # which is why headless never saw it)
+            for _k in [k for k in list(mem) if k not in needed][:AEF_MEM_CHUNKS // 4]:
                 mem.pop(_k, None)
 
     def _aef_chunks(year, cx0, cx1, cy0, cy1):
+        """The range's chunks as a SNAPSHOT dict {key: int8 array}: safe
+        against any later eviction. Hits are re-inserted (LRU-ish)."""
         mem = HOLD.setdefault("aef_chunks", {})
+        needed = {(year, cx, cy)
+                  for cx in range(cx0, cx1 + 1) for cy in range(cy0, cy1 + 1)}
         missing = []
-        for cx in range(cx0, cx1 + 1):
-            for cy in range(cy0, cy1 + 1):
-                if (year, cx, cy) in mem:
-                    continue
-                fp = os.path.join(_AEF_DIR, str(year), f"{cx}_{cy}.npy")
-                if os.path.exists(fp):
-                    mem[(year, cx, cy)] = np.load(fp)
-                else:
-                    missing.append((cx, cy))
+        for key in needed:
+            if key in mem:
+                mem[key] = mem.pop(key)   # refresh recency
+                continue
+            fp = os.path.join(_AEF_DIR, str(year), f"{key[1]}_{key[2]}.npy")
+            if os.path.exists(fp):
+                mem[key] = np.load(fp)
+            else:
+                missing.append((key[1], key[2]))
         if missing:
-            _aef_fetch(year, missing)
-        return mem
+            _aef_fetch(year, missing, needed)
+        return {k: mem[k] for k in needed}
 
     def _aef_mosaic(year, W, S, E, N):
         """int8 (64, H, W) chunk-aligned over the box + (ix0, iy0)."""

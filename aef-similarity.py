@@ -3,11 +3,11 @@
 # dependencies = [
 #     "marimo",
 #     "xarray",
-#     "zarr>=3",
+#     "zarr==3.3.0",
 #     "icechunk==2.1.2",
 #     "obstore",
 #     "pyarrow>=25.0.0",
-#     "numpy",
+#     "numpy==2.5.2",
 #     "anywidget>=0.9",
 #     "lonboard>=0.16.0,<0.17",
 #     "arro3-core",
@@ -1092,7 +1092,7 @@ def _(
         """int8 (64, h, w) -> float32; nodata -128 -> NaN on every band."""
         return _DQ[q.view(np.uint8)]
 
-    def _aef_fetch(year, cx0, cx1, cy0, cy1, missing):
+    def _aef_fetch(year, missing, needed):
         """One chunk-aligned isel read over the missing chunks' bounding box,
         split into the cache (the _ftw_mask pattern). Blocking."""
         mem = HOLD.setdefault("aef_chunks", {})
@@ -1120,35 +1120,43 @@ def _(
                 except Exception:
                     pass
         if len(mem) > AEF_MEM_CHUNKS:
-            for _k in list(mem)[:AEF_MEM_CHUNKS // 4]:
+            # NEVER evict what the current request needs (the KeyError of
+            # 2026-08-24 night, found in aef-agreement.py: eviction dropped
+            # a chunk the caller had just checked off as present, and every
+            # batch in the area died until a restart)
+            for _k in [k for k in list(mem) if k not in needed][:AEF_MEM_CHUNKS // 4]:
                 mem.pop(_k, None)
 
     def _aef_chunks(year, cx0, cx1, cy0, cy1):
-        """Every chunk of the range in memory; disk then network for misses."""
+        """The range's chunks as a SNAPSHOT dict {key: int8 array}: safe
+        against any later eviction. Hits are re-inserted (LRU-ish)."""
         mem = HOLD.setdefault("aef_chunks", {})
+        needed = {(year, cx, cy)
+                  for cx in range(cx0, cx1 + 1) for cy in range(cy0, cy1 + 1)}
         missing = []
-        for cx in range(cx0, cx1 + 1):
-            for cy in range(cy0, cy1 + 1):
-                if (year, cx, cy) in mem:
-                    continue
-                fp = os.path.join(_AEF_DIR, str(year), f"{cx}_{cy}.npy")
-                if os.path.exists(fp):
-                    mem[(year, cx, cy)] = np.load(fp)
-                else:
-                    missing.append((cx, cy))
+        for key in needed:
+            if key in mem:
+                mem[key] = mem.pop(key)   # refresh recency
+                continue
+            fp = os.path.join(_AEF_DIR, str(year), f"{key[1]}_{key[2]}.npy")
+            if os.path.exists(fp):
+                mem[key] = np.load(fp)
+            else:
+                missing.append((key[1], key[2]))
         if missing:
-            _aef_fetch(year, cx0, cx1, cy0, cy1, missing)
-        return mem
+            _aef_fetch(year, missing, needed)
+        return {k: mem[k] for k in needed}
 
-    def _chunk_sim(year, cx, cy, ref, seq):
+    def _chunk_sim(year, cx, cy, ref, seq, chunks):
         """Similarity image of one chunk vs the unit reference: float16
-        (256, 256), NaN where nodata. Cached per (seq, year, chunk)."""
+        (256, 256), NaN where nodata. Cached per (seq, year, chunk); the
+        int8 data comes from the caller's SNAPSHOT, never the shared dict."""
         sims = HOLD.setdefault("aef_sims", {})
         key = (seq, year, cx, cy)
         s = sims.get(key)
         if s is not None:
             return s
-        q = HOLD["aef_chunks"][(year, cx, cy)]
+        q = chunks[(year, cx, cy)]
         v = _dequant(q)                       # (64, 256, 256), NaN at nodata
         dot = np.einsum("k,kij->ij", ref, v)
         norms = HOLD.setdefault("aef_norms", {})
@@ -1175,14 +1183,14 @@ def _(
         iy0 = max(int((AEF_Y0 - N) / AEF_RES), 0)
         iy1 = min(int((AEF_Y0 - S) / AEF_RES), AEF_SHAPE[0] - 1)
         cx0, cx1, cy0, cy1 = ix0 // ACH, ix1 // ACH, iy0 // ACH, iy1 // ACH
-        _aef_chunks(year, cx0, cx1, cy0, cy1)
+        chunks = _aef_chunks(year, cx0, cx1, cy0, cy1)
         mos = np.full(((cy1 - cy0 + 1) * ACH, (cx1 - cx0 + 1) * ACH), np.nan,
                       dtype=np.float32)
         for cx in range(cx0, cx1 + 1):
             for cy in range(cy0, cy1 + 1):
                 mos[(cy - cy0) * ACH:(cy - cy0 + 1) * ACH,
                     (cx - cx0) * ACH:(cx - cx0 + 1) * ACH] = \
-                    _chunk_sim(year, cx, cy, ref, seq).astype(np.float32)
+                    _chunk_sim(year, cx, cy, ref, seq, chunks).astype(np.float32)
         return mos, cx0 * ACH, cy0 * ACH
 
     def _mos_lattice(mos, ix0, iy0):
@@ -1382,8 +1390,7 @@ def _(
         ax1 = min(int((hi_lon + pad - AEF_X0) / AEF_RES), AEF_SHAPE[1] - 1)
         ay0 = max(int((AEF_Y0 - hi_lat - pad) / AEF_RES), 0)
         ay1 = min(int((AEF_Y0 - lo_lat + pad) / AEF_RES), AEF_SHAPE[0] - 1)
-        _aef_chunks(year, ax0 // ACH, ax1 // ACH, ay0 // ACH, ay1 // ACH)
-        mem = HOLD["aef_chunks"]
+        mem = _aef_chunks(year, ax0 // ACH, ax1 // ACH, ay0 // ACH, ay1 // ACH)
         w = np.full((64, ay1 - ay0 + 1, ax1 - ax0 + 1), -128, dtype=np.int8)
         for cx in range(ax0 // ACH, ax1 // ACH + 1):
             for cy in range(ay0 // ACH, ay1 // ACH + 1):
