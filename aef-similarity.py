@@ -4,7 +4,7 @@
 #     "marimo",
 #     "xarray",
 #     "zarr>=3",
-#     "icechunk",
+#     "icechunk==2.1.2",
 #     "obstore",
 #     "pyarrow>=25.0.0",
 #     "numpy",
@@ -847,6 +847,37 @@ def _(anywidget, traitlets):
           };
           killOld(document);
           el.appendChild(wrap);
+          // fullscreen: re-parent the strip into the fullscreen element as a
+          // docked bottom bar (cdl-ftw.py's; document.fullscreenElement is
+          // the shadow HOST, descend to the real one). Works for lonboard's
+          // own fullscreen button and marimo's.
+          const realFs = () => {
+            let fe = document.fullscreenElement;
+            while (fe && fe.shadowRoot && fe.shadowRoot.fullscreenElement)
+              fe = fe.shadowRoot.fullscreenElement;
+            return fe;
+          };
+          const onFs = () => {
+            if (wrap.dataset.dead || !el.isConnected) {
+              wrap.remove();
+              document.removeEventListener("fullscreenchange", onFs);
+              return;
+            }
+            const fe = realFs();
+            if (fe && fe !== el && !el.contains(fe)) {
+              if (getComputedStyle(fe).position === "static")
+                fe.style.position = "relative";
+              wrap.style.cssText =
+                "position:absolute;left:0;right:0;bottom:0;z-index:30;" +
+                "background:rgba(255,255,255,.94);color:#111;" +
+                "padding:.5rem 1.2rem;box-shadow:0 -1px 4px rgba(0,0,0,.18)";
+              fe.appendChild(wrap);
+            } else {
+              wrap.style.cssText = "";
+              el.appendChild(wrap);
+            }
+          };
+          document.addEventListener("fullscreenchange", onFs);
           let seq = 0, deb = null;
           const send = (act, extra) => {
             model.set("ctl", JSON.stringify(Object.assign({
@@ -911,6 +942,7 @@ def _(anywidget, traitlets):
           };
           const bboxTimer = setInterval(() => hideBbox(document), 1000);
           return () => {
+            document.removeEventListener("fullscreenchange", onFs);
             document.removeEventListener("pointerdown", onDown, true);
             document.removeEventListener("click", onClick, true);
             clearInterval(bboxTimer);
