@@ -4,6 +4,7 @@
 #     "marimo",
 #     "xarray",
 #     "zarr>=3",
+#     "icechunk",
 #     "obstore",
 #     "pyarrow>=25.0.0",
 #     "numpy",
@@ -105,6 +106,7 @@ def _():
 
     import anywidget
     import obstore
+    import icechunk
     import xarray as xr
     import zarr
     import traitlets
@@ -132,6 +134,7 @@ def _():
         anywidget,
         asyncio,
         gzip,
+        icechunk,
         io,
         json,
         math,
@@ -159,12 +162,21 @@ def _(mo):
     **Zoom to farmland (similarity lives from camera ~z12), click a field.**
     The kernel flood-fills that field out of the FTW P(field) grid at 10 m,
     averages the **AlphaEarth Foundations** embedding (64 numbers per 10 m
-    pixel, one set per year 2017-2025, everything Sentinel and more saw that
-    year compressed into a vector) over the field's pixels, and repaints the
-    view as **cosine similarity** to it: bright viridis = "looks like the
-    field you clicked". A click off any field compares against that point's
-    own vector. The year slider picks which year's embeddings are compared;
-    the reference keeps its click year, so sliding is a cross-year question.
+    pixel, one set per year 2017-2025: when the ground greened up, how fast,
+    when it was cut, how wet, its radar texture, the whole year's story
+    compressed into a vector; NOT a yield or performance number) over the
+    field's pixels, and repaints the view as **cosine similarity** to it:
+    bright = "this ground went through the same kind of year as the field
+    you clicked". **CDL is the anchor**: the panel names what you clicked
+    (majority class, purity, acres) and what the bright pixels are
+    (composition by CDL class), so the claim is checkable. Two filters, both
+    on at open: **fields only** (paint only inside FTW P(field) >= 0.5) and
+    **crops only** (drop pixels CDL calls non-crop), so water, towns and
+    roads do not participate. A click off any field compares against that
+    point's own vector. The year slider picks which year's embeddings are
+    compared; the reference keeps its click year, so sliding is a
+    cross-year question and the interesting bright/dark changes are real
+    changes on the ground.
 
     | data | what | how it is read |
     |---|---|---|
@@ -183,6 +195,9 @@ def _():
     # ---- constants ----------------------------------------------------------
     SC_BUCKET = "us-west-2.opendata.source.coop"
     AEF_ZARR = "tge-labs/aef-mosaic/"
+    CDL_BUCKET = "chill"
+    CDL_PREFIX = "usda-cropland-data-layer/v0.1.0.icechunk"
+    CDL_ENDPOINT = "https://data.source.coop"
     FTW_ZARR = "tge-labs/ftw-global-data/predictions/zarr/alpha/global.zarr/"
     FTW_VEC = (
         "tge-labs/ftw-global-data/predictions/vectors/alpha/"
@@ -206,6 +221,10 @@ def _():
     ACH = 256                        # AEF inner chunk (px): the cache unit
     AEF_MEM_CHUNKS = 192             # int8 chunks in memory (4 MB each, ~0.8 GB)
     SIM_LO = 0.4                     # ramp floor: cosine 0.4 -> dark, 1.0 -> bright
+    SIM_HI = 0.9                     # "bright": the panel's CDL composition cut
+    FIELDS0 = True                   # paint only inside FTW fields at open
+    CROPS0 = True                    # paint only CDL crop pixels at open
+    ACRES_PER_KM2 = 247.10538
 
     TILE_PX = 256
     BATCH_S = 0.05
@@ -224,6 +243,7 @@ def _():
     HOLD: dict = {}
     return (
         ACH,
+        ACRES_PER_KM2,
         AEF_MEM_CHUNKS,
         AEF_RES,
         AEF_SHAPE,
@@ -233,7 +253,12 @@ def _():
         AEF_ZARR,
         AEF_ZMIN,
         BATCH_S,
+        CDL_BUCKET,
+        CDL_ENDPOINT,
+        CDL_PREFIX,
+        CROPS0,
         EXTENT,
+        FIELDS0,
         FTW_RES,
         FTW_TILE_ZMAX,
         FTW_VEC,
@@ -245,6 +270,7 @@ def _():
         MARGIN,
         OUTLINE_ZMIN,
         SC_BUCKET,
+        SIM_HI,
         SIM_LO,
         TILE_CACHE,
         TILE_PX,
@@ -257,8 +283,19 @@ def _():
 
 
 @app.cell
-def _(AEF_ZARR, FTW_ZARR, S3Store, SC_BUCKET, xr, zarr):
-    # ---- open both stores ----------------------------------------------------
+def _(
+    AEF_ZARR,
+    CDL_BUCKET,
+    CDL_ENDPOINT,
+    CDL_PREFIX,
+    FTW_ZARR,
+    S3Store,
+    SC_BUCKET,
+    icechunk,
+    xr,
+    zarr,
+):
+    # ---- open the stores -----------------------------------------------------
     # AEF: the whole mosaic as one dataset; every read below is chunk-aligned
     # isel windows, so the shard never expands whole (the inner chunks do).
     _aef_store = zarr.storage.ObjectStore(
@@ -280,7 +317,59 @@ def _(AEF_ZARR, FTW_ZARR, S3Store, SC_BUCKET, xr, zarr):
         read_only=True,
     )
     FTW_ROOT = xr.open_zarr(_ftw_store, chunks=None, consolidated=False)
-    return AEF_DS, FTW_ROOT
+    # the 4x level (40 m): the fields-only CLIP at z13+ (cdl-ftw.py's mask
+    # machinery, one level of it: 40 m against ~10-20 m painted pixels)
+    FTW4 = xr.open_zarr(_ftw_store, group="4x", chunks=None, consolidated=False)
+
+    # CDL: THE ANCHOR (2026-08-24, Stephen: a similarity map with no label
+    # anywhere is unfalsifiable). Native groups only: the click's field gets
+    # a name, the bright pixels get a composition; nothing here draws CDL.
+    _storage = icechunk.s3_storage(
+        bucket=CDL_BUCKET,
+        prefix=CDL_PREFIX,
+        endpoint_url=CDL_ENDPOINT,
+        region="us-east-1",
+        anonymous=True,
+        force_path_style=True,
+    )
+    _repo = icechunk.Repository.open(_storage)
+    _session = _repo.readonly_session("main")
+    CDL30 = xr.open_zarr(_session.store, group="30m", chunks=None)   # 2008-2025
+    CDL10 = xr.open_zarr(_session.store, group="10m", chunks=None)   # 2024-2025
+
+    # the classes from the store's own attrs; red-dominant hexes remapped to a
+    # blue/purple cycle for the panel's chips (protan-safe; cdl-ftw.py's rule)
+    _at = CDL30["crop_type"].attrs
+    _names, _colors = _at["class_names"], _at["class_colors"]
+
+    def _noncrop(name):
+        if name.startswith("Developed"):
+            return True
+        return name in {
+            "Background", "Clouds/No Data", "Water", "Open Water",
+            "Perennial Ice/Snow", "Barren", "Forest", "Deciduous Forest",
+            "Evergreen Forest", "Mixed Forest", "Shrubland",
+            "Grassland/Pasture", "Grass/Pasture", "Woody Wetlands",
+            "Herbaceous Wetlands", "Wetlands", "Nonag/Undefined",
+        }
+
+    def _rgb(hexs):
+        return int(hexs[1:3], 16), int(hexs[3:5], 16), int(hexs[5:7], 16)
+
+    _SAFE_CYCLE = ["#3F6BD6", "#8E44AD", "#00B8D4", "#D633C4",
+                   "#5C6BC0", "#0091EA", "#7C4DFF", "#6A1B9A"]
+    _i = 0
+    CLASSES = {}
+    for _code in sorted(_names, key=int):
+        _nm, _hx = _names[_code], _colors[_code]
+        _r, _g, _b = _rgb(_hx)
+        _safe = _hx
+        if _r >= 170 and _g <= 100 and _b <= 110:
+            _safe = _SAFE_CYCLE[_i % len(_SAFE_CYCLE)]
+            _i += 1
+        CLASSES[int(_code)] = (_nm, _safe, _noncrop(_nm))
+    NONCROP_CODES = sorted(c for c, v in CLASSES.items() if v[2])
+    return AEF_DS, CDL10, CDL30, CLASSES, FTW4, FTW_ROOT, NONCROP_CODES
 
 
 @app.cell
@@ -302,6 +391,43 @@ def _(MARGIN, VIEW_H, VIEW_W, math, np):
         dlat = VIEW_H * span * math.cos(math.radians(vs["latitude"])) * (1 + MARGIN) / 2
         return (vs["longitude"] - dlon, vs["latitude"] - dlat,
                 vs["longitude"] + dlon, vs["latitude"] + dlat)
+
+    def albers_xy(lon, lat):
+        """EPSG:5070 forward (closed form, numpy; cdl-ftw.py's, verified to
+        the mm). The CDL grids live in 5070; every sample goes through this."""
+        a = 6378137.0
+        e2 = 0.00669438002290
+        e = math.sqrt(e2)
+        lat0, lon0 = math.radians(23.0), math.radians(-96.0)
+        lat1, lat2 = math.radians(29.5), math.radians(45.5)
+
+        def m(p):
+            return np.cos(p) / np.sqrt(1 - e2 * np.sin(p) ** 2)
+
+        def q(p):
+            sp = np.sin(p)
+            return (1 - e2) * (sp / (1 - e2 * sp * sp)
+                               - (1 / (2 * e)) * np.log((1 - e * sp) / (1 + e * sp)))
+
+        n = (m(lat1) ** 2 - m(lat2) ** 2) / (q(lat2) - q(lat1))
+        C = m(lat1) ** 2 + n * q(lat1)
+        rho0 = a * np.sqrt(C - n * q(lat0)) / n
+        lon = np.radians(lon)
+        lat = np.radians(lat)
+        rho = a * np.sqrt(C - n * q(lat)) / n
+        th = n * (lon - lon0)
+        return rho * np.sin(th), rho0 - rho * np.cos(th)
+
+    def albers_box(W, S, E, N):
+        """Albers box of a lon/lat box, densified + clamped (cdl-ftw.py's)."""
+        lons = np.linspace(W, E, 9)
+        lats = np.linspace(S, N, 9)
+        bl = np.concatenate([lons, lons, np.full(9, W), np.full(9, E)])
+        bt = np.concatenate([np.full(9, S), np.full(9, N), lats, lats])
+        X, Y = albers_xy(bl, bt)
+        _X0, _Y0, _X1, _Y1 = -2417835.0, 158265.0, 2387295.0, 3321225.0
+        return (max(float(X.min()), _X0), max(float(Y.min()), _Y0),
+                min(float(X.max()), _X1), min(float(Y.max()), _Y1))
 
     def unproject(vs, px, py, w, h):
         """Canvas pixel -> lon/lat under the deck camera (512-px world tiles,
@@ -327,7 +453,7 @@ def _(MARGIN, VIEW_H, VIEW_W, math, np):
     _a = np.linspace(0, 1, len(_VIR))
     VIRIDIS = np.stack([np.interp(_t, _a, _VIR[:, i]) for i in range(3)],
                        axis=1).astype(np.uint8)
-    return VIRIDIS, bbox4326, tile_box, unproject
+    return VIRIDIS, albers_box, albers_xy, bbox4326, tile_box, unproject
 
 
 @app.cell
@@ -641,6 +767,7 @@ def _(anywidget, traitlets):
         ctl = traitlets.Unicode("").tag(sync=True)
         status = traitlets.Unicode("").tag(sync=True)
         legend = traitlets.Unicode("").tag(sync=True)
+        panel = traitlets.Unicode("").tag(sync=True)
 
         _esm = r"""
         function render({ model, el }) {
@@ -663,6 +790,17 @@ def _(anywidget, traitlets):
           const yv = document.createElement("span");
           yv.style.cssText = "font-weight:600;font-variant-numeric:tabular-nums";
           yv.textContent = range.value;
+          const mk = (text, on) => {
+            const l = document.createElement("label");
+            l.style.cssText =
+              "display:inline-flex;align-items:center;gap:.35rem;cursor:pointer";
+            const i = document.createElement("input");
+            i.type = "checkbox"; i.checked = on;
+            l.appendChild(i); l.appendChild(document.createTextNode(text));
+            return [l, i];
+          };
+          const [labF, fld] = mk("fields only", true);
+          const [labC, crp] = mk("crops only", true);
           const clr = document.createElement("button");
           clr.textContent = "clear";
           clr.title = "drop the reference; outlines only";
@@ -687,14 +825,17 @@ def _(anywidget, traitlets):
           };
           model.on("change:legend", renderLegend);
           renderLegend();
-          box.append(yl, range, yv, clr, rfr, search, legendBox);
+          box.append(yl, range, yv, labF, labC, clr, rfr, search, legendBox);
           const status = document.createElement("div");
           status.style.cssText =
             "font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;" +
             "opacity:.85;padding:.15rem 0;min-height:1.2em";
+          const panel = document.createElement("div");
+          panel.style.cssText =
+            "font:13px ui-sans-serif,system-ui,sans-serif;padding:.15rem 0";
           const wrap = document.createElement("div");
           wrap.dataset.aefStrip = "1";
-          wrap.append(box, status);
+          wrap.append(box, panel, status);
           const killOld = (root) => {
             if (!root || !root.querySelectorAll) return;
             root.querySelectorAll("[data-aef-strip]").forEach((w) => {
@@ -709,7 +850,8 @@ def _(anywidget, traitlets):
           let seq = 0, deb = null;
           const send = (act, extra) => {
             model.set("ctl", JSON.stringify(Object.assign({
-              act: act, year: +range.value, n: ++seq }, extra || {})));
+              act: act, year: +range.value, fields: fld.checked,
+              crops: crp.checked, n: ++seq }, extra || {})));
             model.save_changes();
           };
           const commit = () => {
@@ -718,6 +860,8 @@ def _(anywidget, traitlets):
           };
           range.addEventListener("input", () => { yv.textContent = range.value; });
           range.addEventListener("change", commit);
+          fld.addEventListener("change", commit);
+          crp.addEventListener("change", commit);
           clr.addEventListener("click", () => send("clear"));
           rfr.addEventListener("click", () => send("refresh"));
           search.addEventListener("keydown", (e) => {
@@ -747,6 +891,9 @@ def _(anywidget, traitlets):
           const paintS = () => { status.textContent = model.get("status") || ""; };
           model.on("change:status", paintS);
           paintS();
+          const paintP = () => { panel.innerHTML = model.get("panel") || ""; };
+          model.on("change:panel", paintP);
+          paintP();
           // hide lonboard's draw-box tool (rendered unconditionally in 0.16)
           const hideBbox = (root) => {
             if (!root || !root.querySelectorAll) return;
@@ -802,6 +949,7 @@ def _(HudControls, mo):
 @app.cell
 def _(
     ACH,
+    ACRES_PER_KM2,
     AEF_DS,
     AEF_MEM_CHUNKS,
     AEF_RES,
@@ -811,8 +959,14 @@ def _(
     AEF_YEARS,
     AEF_ZMIN,
     BATCH_S,
+    CDL10,
+    CDL30,
+    CLASSES,
+    CROPS0,
     EXTENT,
     EncodedImage,
+    FIELDS0,
+    FTW4,
     FTW_ROOT,
     FTW_RES,
     FTW_TILE_ZMAX,
@@ -822,8 +976,10 @@ def _(
     HOME,
     Image,
     ImageDraw,
+    NONCROP_CODES,
     OUTLINE_ZMIN,
     RasterLayer,
+    SIM_HI,
     SIM_LO,
     STATES,
     TILE_CACHE,
@@ -833,6 +989,8 @@ def _(
     VIEW_ZMIN,
     VIRIDIS,
     YEAR0,
+    albers_box,
+    albers_xy,
     asyncio,
     bbox4326,
     deck,
@@ -860,8 +1018,12 @@ def _(
     _year = int(_c.get("year", YEAR0))
     if _year not in AEF_YEARS:
         _year = YEAR0
+    _fields = bool(_c.get("fields", FIELDS0))
+    _crops = bool(_c.get("crops", CROPS0))
     _act = _c.get("act", "set")
     _q = str(_c.get("q", "")).strip()
+    _NONCROP = np.zeros(256, dtype=bool)
+    _NONCROP[[0, 81, *NONCROP_CODES]] = True   # 0 fill, 81 clouds
 
     try:
         HOLD["loop"] = asyncio.get_running_loop()
@@ -991,6 +1153,103 @@ def _(
                     _chunk_sim(year, cx, cy, ref, seq).astype(np.float32)
         return mos, cx0 * ACH, cy0 * ACH
 
+    def _mos_lattice(mos, ix0, iy0):
+        """The mosaic's pixel-centre lon/lat mesh (float64 2D pair)."""
+        lonv = AEF_X0 + (ix0 + np.arange(mos.shape[1]) + 0.5) * AEF_RES
+        latv = AEF_Y0 - (iy0 + np.arange(mos.shape[0]) + 0.5) * AEF_RES
+        return np.meshgrid(lonv, latv)
+
+    # ---- the FTW clip at 40 m: cdl-ftw.py's mask cache, one level (4x),
+    # same disk layout ($TMPDIR/x-sql-marimo/ftw-mask/4x/<year>/), shared.
+    _CH = 512
+    _MASK_DIR = os.path.join(tempfile.gettempdir(), "x-sql-marimo", "ftw-mask")
+
+    def _ftw_mask(fyear, W, S, E, N):
+        """Dense boolean of P(field) >= 0.5 at 40 m over the box, chunk-
+        aligned, memory + packbits disk cache. (mask, fx0, fy0, res)."""
+        f = 4
+        res = FTW_RES * f
+        ix0 = int(math.floor((W + 180.0) / res))
+        ix1 = int(math.floor((E + 180.0) / res))
+        iy0 = int(math.floor((FTW_Y0 - N) / res))
+        iy1 = int(math.floor((FTW_Y0 - S) / res))
+        cx0, cx1, cy0, cy1 = ix0 // _CH, ix1 // _CH, iy0 // _CH, iy1 // _CH
+        cache = HOLD.setdefault("fchunks", {})
+        missing = []
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                if (fyear, f, cx, cy) in cache:
+                    continue
+                fp = os.path.join(_MASK_DIR, f"{f}x", str(fyear), f"{cx}_{cy}.npy")
+                if os.path.exists(fp):
+                    cache[(fyear, f, cx, cy)] = np.unpackbits(
+                        np.load(fp)).reshape(_CH, _CH).astype(bool)
+                else:
+                    missing.append((cx, cy))
+        if missing:
+            mx0, mx1 = min(c[0] for c in missing), max(c[0] for c in missing)
+            my0, my1 = min(c[1] for c in missing), max(c[1] for c in missing)
+            lon0, lon1 = mx0 * _CH * res - 180.0, (mx1 + 1) * _CH * res - 180.0
+            lat1, lat0 = FTW_Y0 - my0 * _CH * res, FTW_Y0 - (my1 + 1) * _CH * res
+            da = FTW4["variables"].sel(time=f"{fyear}-01-01", band="field").sel(
+                x=slice(lon0, lon1), y=slice(lat1, lat0))
+            vals = np.asarray(da.values) >= 0.5
+            big = np.zeros(((my1 - my0 + 1) * _CH, (mx1 - mx0 + 1) * _CH), dtype=bool)
+            if vals.size:
+                gx = np.floor((da.x.values + 180.0) / res).astype(np.int64) - mx0 * _CH
+                gy = np.floor((FTW_Y0 - da.y.values) / res).astype(np.int64) - my0 * _CH
+                okx = (gx >= 0) & (gx < big.shape[1])
+                oky = (gy >= 0) & (gy < big.shape[0])
+                big[np.ix_(gy[oky], gx[okx])] = vals[oky][:, okx]
+            for cx in range(mx0, mx1 + 1):
+                for cy in range(my0, my1 + 1):
+                    piece = big[(cy - my0) * _CH:(cy - my0 + 1) * _CH,
+                                (cx - mx0) * _CH:(cx - mx0 + 1) * _CH].copy()
+                    cache[(fyear, f, cx, cy)] = piece
+                    fp = os.path.join(_MASK_DIR, f"{f}x", str(fyear), f"{cx}_{cy}.npy")
+                    try:
+                        os.makedirs(os.path.dirname(fp), exist_ok=True)
+                        tmp = f"{fp}.{threading.get_ident()}.tmp"
+                        np.save(tmp, np.packbits(piece))
+                        os.replace(tmp + ".npy" if not tmp.endswith(".npy") else tmp, fp)
+                    except Exception:
+                        pass
+            if len(cache) > 600:
+                for _k in list(cache)[:100]:
+                    cache.pop(_k, None)
+        mask = np.zeros(((cy1 - cy0 + 1) * _CH, (cx1 - cx0 + 1) * _CH), dtype=bool)
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                mask[(cy - cy0) * _CH:(cy - cy0 + 1) * _CH,
+                     (cx - cx0) * _CH:(cx - cx0 + 1) * _CH] = cache[(fyear, f, cx, cy)]
+        return mask, cx0 * _CH, cy0 * _CH, res
+
+    def _cdl_codes(year, LON, LAT):
+        """CDL class code per lattice point (uint8, 0 outside): the 10 m group
+        for 2024-2025, else 30 m native. One windowed read + index sample."""
+        ds = CDL10 if year in (2024, 2025) else CDL30
+        pix = 10.0 if year in (2024, 2025) else 30.0
+        x0, y0, x1, y1 = albers_box(float(LON.min()), float(LAT.min()),
+                                    float(LON.max()), float(LAT.max()))
+        da = ds.crop_type.sel(year=year).sel(x=slice(x0, x1), y=slice(y1, y0))
+        g = np.asarray(da.values)
+        code = np.zeros(LON.shape, dtype=np.uint8)
+        if not g.size:
+            return code
+        gx0 = float(da.x.values[0]) - pix / 2
+        gy1 = float(da.y.values[0]) + pix / 2
+        X, Y = albers_xy(LON, LAT)
+        jx = ((X - gx0) / pix).astype(np.int64)
+        jy = ((gy1 - Y) / pix).astype(np.int64)
+        ok = (jx >= 0) & (jx < g.shape[1]) & (jy >= 0) & (jy < g.shape[0])
+        code[ok] = g[jy[ok], jx[ok]]
+        return code
+
+    def _chip(hx):
+        return ('<span style="display:inline-block;width:10px;height:10px;'
+                f'border-radius:2px;background:{hx};margin-right:4px;'
+                'vertical-align:-1px"></span>')
+
     def _render_tiles(mos, ix0, iy0, boxes, rings, px=TILE_PX):
         """PNGs per tile from the similarity mosaic (nearest per output
         pixel; viridis on [SIM_LO, 1]; NaN transparent) + outline polylines
@@ -1113,16 +1372,44 @@ def _(
         else:
             vec = np.nanmean(v[:, jy, jx], axis=1)
         if not np.all(np.isfinite(vec)):
-            return None, "no AlphaEarth data here"
+            return None, "no AlphaEarth data here", ""
         nrm = float(np.linalg.norm(vec))
         if nrm == 0:
-            return None, "empty vector here"
-        return (vec / nrm).astype(np.float32), desc
+            return None, "empty vector here", ""
+        # name the click with CDL: majority class over the field's pixels
+        # (or the point), purity, acres; the title that makes a click mean
+        # something (Stephen, 2026-08-24)
+        codes = _cdl_codes(year, np.asarray(plon, dtype=np.float64),
+                           np.asarray(plat, dtype=np.float64))
+        cnt = np.bincount(codes, minlength=256)
+        cnt[0] = 0
+        mcode = int(cnt.argmax())
+        latm = math.radians(float(np.mean(plat)))
+        pxa = ((FTW_RES * 111.32 * math.cos(latm))
+               * (FTW_RES * 110.574)) * ACRES_PER_KM2
+        if mcode and cnt[mcode]:
+            nm, hx, _nc = CLASSES.get(mcode, (f"code {mcode}", "#888", True))
+            pur = 100 * cnt[mcode] / max(len(codes), 1)
+            what = (f"{_chip(hx)}<b>{nm}</b> "
+                    f"<span style='opacity:.75'>(CDL {year}: {pur:.0f}% of its "
+                    f"pixels)</span>")
+        else:
+            what = "<b>unlabelled ground</b> (CDL has no class here)"
+        if "field of" in desc:
+            head = (f"similarity to: {what} · a {len(plon) * pxa:,.0f} ac "
+                    f"FTW field at {lat:.4f}, {lon:.4f}")
+        else:
+            head = (f"similarity to: {what} · the point at {lat:.4f}, "
+                    f"{lon:.4f} (no FTW field here)")
+        html = (head + f'<div style="opacity:.6;font-size:12px">bright = '
+                f'ground whose year, as the satellites saw it (AlphaEarth '
+                f'embedding), looks like this {"field" if "field of" in desc else "point"}\'s</div>')
+        return (vec / nrm).astype(np.float32), desc, html
 
     # ---- state + tile serve --------------------------------------------------
     _ref = HOLD.get("ref")          # (vec, seq, desc, click_year) or None
     _seq = _ref[1] if _ref else 0
-    _state = (_year, _seq)
+    _state = (_year, _seq, _fields, _crops)
     _tiles = HOLD.setdefault("tiles", {})
 
     def _states_in(W, S, E, N):
@@ -1145,8 +1432,52 @@ def _(
             # z12 exists for outlines only: a z12 whole-view is hundreds of
             # 4 MB chunks (no pyramid); one zoom in and similarity appears
             note = f" · zoom in for similarity (from z{AEF_ZMIN})"
+        comp_html = ""
         if ref is not None and ref[1] == _seq and z >= AEF_ZMIN:
             mos, ix0, iy0 = _sim_mosaic(_year, ref[0], _seq, W, S, E, N)
+            mos = mos.copy()   # the cached chunk sims stay unmasked
+            LON, LAT = _mos_lattice(mos, ix0, iy0)
+            code = None
+            if _fields:
+                fmask, fx0, fy0, fres = _ftw_mask(
+                    _year if _year in FTW_YEARS else FTW_YEARS[0],
+                    float(LON.min()), float(LAT.min()),
+                    float(LON.max()), float(LAT.max()))
+                fx = np.floor((LON + 180.0) / fres).astype(np.int64) - fx0
+                fy = np.floor((FTW_Y0 - LAT) / fres).astype(np.int64) - fy0
+                inb = (fx >= 0) & (fx < fmask.shape[1]) & (fy >= 0) & (fy < fmask.shape[0])
+                infield = np.zeros(mos.shape, dtype=bool)
+                infield[inb] = fmask[fy[inb], fx[inb]]
+                mos[~infield] = np.nan
+            # the codes are read with crops-only off too: the bright
+            # composition needs names either way
+            code = _cdl_codes(_year, LON, LAT)
+            if _crops:
+                mos[_NONCROP[code]] = np.nan
+            # what the bright pixels ARE, by CDL: the sentence that makes the
+            # picture legible (Stephen, 2026-08-24)
+            valid = np.isfinite(mos)
+            nvalid = int(valid.sum())
+            bright = valid & (mos >= SIM_HI)
+            nbright = int(bright.sum())
+            latm = math.radians(float(LAT.mean()))
+            pxa = ((AEF_RES * 111.32 * math.cos(latm))
+                   * (AEF_RES * 110.574)) * ACRES_PER_KM2
+            if nvalid and nbright:
+                cnt = np.bincount(code[bright], minlength=256)
+                order = [int(c) for c in np.argsort(-cnt) if cnt[c] > 0][:5]
+                parts = []
+                for c in order:
+                    nm, hx, _nc = CLASSES.get(c, (f"code {c}", "#888", True))
+                    parts.append(f"{_chip(hx)}{nm} "
+                                 f"{100 * cnt[c] / nbright:.0f}%")
+                comp_html = (
+                    f"bright (cosine ≥ {SIM_HI}): "
+                    f"<b>{nbright * pxa / 1e3:,.1f}k ac</b>, "
+                    f"{100 * nbright / nvalid:.0f}% of the painted area · "
+                    f"CDL {_year} says it is: " + " · ".join(parts))
+            elif nvalid:
+                comp_html = f"nothing over cosine {SIM_HI} in the painted area"
         rings = None
         nt = 0
         if z >= OUTLINE_ZMIN:
@@ -1162,8 +1493,11 @@ def _(
                 _tiles.pop(_k, None)
         if ref is not None:
             line = (f"z{z} · {len(keys)} tiles · sim vs {ref[2]} "
-                    f"(clicked in {ref[3]}) on {_year} embeddings · "
-                    f"{ndrawn:,} px{note} · {int((time.time() - t0) * 1000)} ms")
+                    f"(clicked in {ref[3]}) on {_year} embeddings"
+                    + (" · fields only" if _fields else "")
+                    + (" · crops only" if _crops else "")
+                    + f" · {ndrawn:,} px{note} · "
+                    + f"{int((time.time() - t0) * 1000)} ms")
         else:
             line = (f"z{z} · {len(keys)} tiles · outlines only · click a "
                     f"field · {int((time.time() - t0) * 1000)} ms")
@@ -1171,6 +1505,17 @@ def _(
         def _push():
             HOLD.setdefault("last_by_state", {})[_state] = line
             _say(line)
+            if ref is not None:
+                html = HOLD.get("ref_html", "")
+                if comp_html:
+                    html += f'<div style="margin-top:2px">{comp_html}</div>'
+                elif note:
+                    html += ('<div style="opacity:.6;margin-top:2px">'
+                             'zoom in for the similarity paint</div>')
+                try:
+                    hud.widget.panel = html
+                except Exception:
+                    pass
 
         _loop = HOLD.get("loop")
         if _loop is not None:
@@ -1228,9 +1573,11 @@ def _(
         if ref is None:
             return ('<span style="opacity:.7">click a field on the map '
                     '(similarity from camera ~z12)</span>')
+        filt = " · ".join(s for s, on in (("FTW fields only", _fields),
+                                          ("CDL crops only", _crops)) if on)
         return (f'<span style="opacity:.8">cosine {SIM_LO:.1f}</span>{bar}'
                 f'<span style="opacity:.8">1.0</span>'
-                f'<span style="opacity:.7">· {ref[2]}</span>')
+                + (f'<span style="opacity:.6">{filt}</span>' if filt else ""))
 
     def _rebuild():
         HOLD["batch"] = None
@@ -1242,11 +1589,16 @@ def _(
             hud.widget.legend = _legend_html()
         except Exception:
             pass
+        ref = HOLD.get("ref")
+        if ref is not None:
+            try:
+                hud.widget.panel = HOLD.get("ref_html", "")
+            except Exception:
+                pass
         _last = HOLD.get("last_by_state", {}).get(_state)
         if _last is not None:
             _say(_last + " · from cache")
         else:
-            ref = HOLD.get("ref")
             _say(f"{_year} embeddings · "
                  + (f"sim vs {ref[2]} · loading …" if ref else
                     "click a field (similarity from camera ~z12) · loading …"))
@@ -1333,23 +1685,29 @@ def _(
             _lon, _lat = unproject(_vs, float(_c["px"]), float(_c["py"]),
                                    float(_c["w"]), float(_c["h"]))
             _say(f"reading the field at {_lat:.4f}, {_lon:.4f} …")
-            _vec, _desc = _ref_from_click(_lon, _lat, _year)
+            _vec, _desc, _html = _ref_from_click(_lon, _lat, _year)
             if _vec is None:
                 _say(_desc)
             else:
                 _seq = HOLD.get("ref_seq", 0) + 1
                 HOLD["ref_seq"] = _seq
                 HOLD["ref"] = (_vec, _seq, _desc, _year)
-                _state = (_year, _seq)
+                HOLD["ref_html"] = _html
+                _state = (_year, _seq, _fields, _crops)
                 HOLD["layer_state"] = None
         except Exception as _e:
             _say(f"click error: {type(_e).__name__}: {_e}")
 
     if _act == "clear":
         HOLD["ref"] = None
+        HOLD["ref_html"] = ""
         _seq = 0
-        _state = (_year, 0)
+        _state = (_year, 0, _fields, _crops)
         HOLD["layer_state"] = None
+        try:
+            hud.widget.panel = ""
+        except Exception:
+            pass
 
     if _act == "refresh":
         HOLD["layer_state"] = None
