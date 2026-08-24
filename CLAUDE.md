@@ -85,6 +85,23 @@ hold the full history; a copy of the FTW notes is in `docs/`.
 - The P(field) mask is cached by the Zarr's 512-px inner chunk, in memory and
   as packbits on disk (`$TMPDIR/x-sql-marimo/ftw-mask/`), so a pan reads only
   missing chunks. Tile blobs cache under `$TMPDIR/x-sql-marimo/ftw-tiles/`.
+- marimo lessons, the 2026-08-24 night set (all found by driving the real
+  frontend with playwright; NONE are visible headless): a widget TRAIT update
+  from a worker thread (even via call_soon_threadsafe) syncs kernel-side but
+  NEVER reaches a live frontend (the in-place polygon table drew once at
+  startup, then every pan lost the fills) -> store the data, poke a HUD trait,
+  let the HUD's JS answer through ctl, do the assignment in that cell run;
+  creating ANY widget mid-session (even in a ctl-triggered run) leaves the
+  frontend with "Model not found for key" and the whole deck goes blank ->
+  every layer is created in the map cell and lives forever, only traits are
+  assigned; TWO vector layers collide on deck id "undefined-0" (model_id is
+  undefined under marimo; the JS patch fixed raster ids only) and deck asserts
+  -> one vector layer, selection is a colour, not a layer. Frontend verification:
+  `uv run marimo edit <nb> --headless --port N --no-token` + playwright
+  (chromium installed), click run-all at (1558, 924) in a 1600x1000 viewport,
+  wait ~75 s cold, screenshot the big canvas; HUD text lives in a shadow root
+  (page.inner_text misses it, walk shadowRoots in JS); a second page connecting
+  to the session shows a blank deck (reconnect artifact, not a bug).
 - marimo lessons: underscore-prefixed cell locals are mangled and dropped
   after the run unless a closure's reference is seen (a helper must be defined
   above its use in the same cell; forward references are not kept); every trait
