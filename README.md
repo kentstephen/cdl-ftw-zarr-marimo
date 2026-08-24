@@ -27,7 +27,17 @@ unit reference; similarity renders as viridis tiles through the same serve
 machinery, FTW outlines on top. The mosaic has no pyramid, so similarity lives
 from camera ~z12. The click is not lonboard's `on_click` (never worked under
 marimo): the HUD's JS catches canvas clicks and the kernel unprojects them.
-First step toward the AEF x FTW x CDL agreement map.
+First step toward the agreement map.
+
+The third notebook, `aef-agreement.py`: the click-a-field question asked of
+every field at once. Per view, the FTW fields (connected components of
+P(field) at 10 m) each get a mean AEF vector and a CDL majority crop; each
+crop field is scored by how many of its 10 nearest embedding look-alikes in
+view carry its CDL label. Dark = the datasets agree; bright yellow = they
+disagree (a young orchard, a CDL mislabel, an odd field): a surprise
+detector. The panel lists the most surprising fields; clicking a field gives
+its story (CDL class, acres, what its look-alikes are). First run found an
+88 ac Delta field CDL calls Cotton whose look-alikes are Tomatoes 6/10.
 
 Data:
 
