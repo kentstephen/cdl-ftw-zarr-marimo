@@ -106,9 +106,7 @@ def _():
     import urllib.request
 
     import morecantile
-    import pyarrow as pa
-    from arro3.core import Table as A3Table
-    from lonboard import Map, SolidPolygonLayer, RasterLayer
+    from lonboard import Map, RasterLayer
     from lonboard.raster import EncodedImage
     from lonboard.basemap import CartoStyle, MaplibreBasemap
     from obstore.store import S3Store
@@ -116,7 +114,6 @@ def _():
     import marimo as mo
 
     return (
-        A3Table,
         CartoStyle,
         EncodedImage,
         Image,
@@ -125,7 +122,6 @@ def _():
         MaplibreBasemap,
         RasterLayer,
         S3Store,
-        SolidPolygonLayer,
         ThreadPoolExecutor,
         anywidget,
         asyncio,
@@ -140,7 +136,6 @@ def _():
         np,
         obstore,
         os,
-        pa,
         struct,
         tempfile,
         threading,
@@ -683,84 +678,6 @@ def _(
         rings = [r for v, _ in res for r in v]
         return rings, len(jobs), sum(1 for _, miss in res if miss)
 
-    # ---- the same tiles as CLOSED POLYGON RINGS (the vector fill, Stephen
-    # 2026-08-24 night: "lets just use the pmtiles"): no clip-segment
-    # dropping here (a fill needs the ring closed, tile edge included; the
-    # seam problem is the STROKE's, and strokes stay with the raster
-    # outlines). Same blobs, own decode + memory cache.
-    _memp, _memp_lock = {}, threading.Lock()
-
-    def _decode_poly(blob, year, z, x, y):
-        if blob[:2] == b"\x1f\x8b":
-            blob = gzip.decompress(blob)
-        want = str(year)
-        out = []
-        n = 1 << z
-        for f, _w, v in _fields_pb(blob):
-            if f != 3:
-                continue
-            name, extent, feats = None, 4096, []
-            for lf, _lw, lv in _fields_pb(v):
-                if lf == 1:
-                    name = lv.decode("utf-8")
-                elif lf == 2:
-                    feats.append(lv)
-                elif lf == 5:
-                    extent = lv
-            if name != want:
-                continue
-            for fv in feats:
-                gtype, geom = 0, b""
-                for ff, _fw, fvv in _fields_pb(fv):
-                    if ff == 3:
-                        gtype = fvv
-                    elif ff == 4:
-                        geom = fvv
-                if gtype != 3:
-                    continue
-                for ring in _rings(geom):
-                    if len(ring) < 4:
-                        continue
-                    a = np.asarray(ring, dtype=np.float64)
-                    if not np.array_equal(a[0], a[-1]):
-                        a = np.vstack([a, a[:1]])
-                    lon = (x + a[:, 0] / extent) / n * 360.0 - 180.0
-                    lat = np.degrees(np.arctan(np.sinh(np.pi * (1.0 - 2.0 * (y + a[:, 1] / extent) / n))))
-                    out.append(np.column_stack([lon, lat]))
-        return out
-
-    def _tile_poly(st, z, x, y, year):
-        key = (st, z, x, y, year)
-        with _memp_lock:
-            v = _memp.get(key)
-        if v is not None:
-            return v
-        b = _blob(st, z, x, y)
-        v = _decode_poly(b, year, z, x, y) if b else []
-        with _memp_lock:
-            _memp[key] = v
-            if len(_memp) > 2000:
-                for _k in list(_memp)[:400]:
-                    _memp.pop(_k, None)
-        return v
-
-    def ftw_tile_polys(states, year, W, S, E, N, z):
-        """Closed rings (lon/lat, first point repeated) over the box."""
-        n = 1 << z
-
-        def tx(lon):
-            return min(n - 1, max(0, int((lon + 180) / 360 * n)))
-
-        def ty(lat):
-            lat = max(-85.05, min(85.05, lat))
-            return min(n - 1, max(0, int((1 - math.log(math.tan(math.radians(lat))
-                                                     + 1 / math.cos(math.radians(lat))) / math.pi) / 2 * n)))
-
-        jobs = [(st, z, x, y, year) for st in states
-                for x in range(tx(W), tx(E) + 1) for y in range(ty(N), ty(S) + 1)]
-        res = list(_tpool.map(lambda j: _tile_poly(*j), jobs))
-        return [r for v in res for r in v]
-
     STATES = [
         ("AB", -113.4609, 48.8716, -109.9513, 49.1153), ("AK", -179.1069, 51.2673, 178.5722, 71.3595),
         ("AL", -88.4692, 30.2366, -84.9303, 35.0198), ("AR", -94.6086, 32.9912, -89.6512, 36.5159),
@@ -795,7 +712,7 @@ def _(
         ("YT", -141.0438, 60.0153, -139.0725, 69.6589),
     ]
     _ = FTW_TILE_ZMAX
-    return STATES, ftw_tile_polys, ftw_tile_rings
+    return STATES, ftw_tile_rings
 
 
 @app.cell
@@ -808,7 +725,6 @@ def _(anywidget, traitlets):
 
         ctl = traitlets.Unicode("").tag(sync=True)
         status = traitlets.Unicode("").tag(sync=True)
-        poke = traitlets.Unicode("").tag(sync=True)
         legend = traitlets.Unicode("").tag(sync=True)
         panel = traitlets.Unicode("").tag(sync=True)
 
@@ -951,15 +867,6 @@ def _(anywidget, traitlets):
           const paintP = () => { panel.innerHTML = model.get("panel") || ""; };
           model.on("change:panel", paintP);
           paintP();
-          // the polygon roundtrip: the serve thread cannot hand a new widget
-          // (or a table update) to the frontend under marimo; it stores the
-          // built polygons, sets `poke`, and THIS reply turns the update
-          // into a cell run, where creating the layer works (2026-08-24
-          // night: the in-place table push drew once at startup and never
-          // again; every pan lost the fills)
-          model.on("change:poke", () => {
-            if (model.get("poke")) send("polys");
-          });
           const hideBbox = (root) => {
             if (!root || !root.querySelectorAll) return;
             root.querySelectorAll("button[aria-label]").forEach((b) => {
@@ -990,50 +897,10 @@ def _(anywidget, traitlets):
 
 
 @app.cell
-def _(
-    CartoStyle,
-    HOLD: dict,
-    HOME,
-    LONBOARD_PATCHED,
-    Map,
-    MaplibreBasemap,
-    SolidPolygonLayer,
-    np,
-    pa,
-):
+def _(CartoStyle, HOLD: dict, HOME, LONBOARD_PATCHED, Map, MaplibreBasemap):
     # ---- map cell: builds the Map, must never re-run ------------------------
-    # The POLYGON layer is created HERE, once, and NEVER removed from
-    # deck.layers (under marimo a removed layer is closed; a widget created
-    # outside a cell run never reaches the frontend). The serve only assigns
-    # its table + fill colours in place; the raster layer above it keeps the
-    # seam-free outlines and the z12 view.
     _ = LONBOARD_PATCHED
     HOLD["layer_state"] = None
-
-    def _dummy_table():
-        flat = np.array([[-140.0, 20.0], [-139.999, 20.0],
-                         [-139.999, 20.001], [-140.0, 20.0]])
-        coords = pa.FixedSizeListArray.from_arrays(
-            pa.array(flat.ravel(), type=pa.float64()), 2)
-        rings = pa.ListArray.from_arrays(pa.array([0, 4], type=pa.int32()), coords)
-        polys = pa.ListArray.from_arrays(pa.array([0, 1], type=pa.int32()), rings)
-        schema = pa.schema([pa.field("geometry", polys.type, metadata={
-            b"ARROW:extension:name": b"geoarrow.polygon"})])
-        return pa.Table.from_arrays([polys], schema=schema)
-
-    # ONE polygon layer, created here and never replaced. Creating any
-    # widget mid-session leaves the frontend with "Model not found for key"
-    # and the deck goes blank; a SECOND vector layer collides on deck id
-    # "undefined-0" (model_id is undefined under marimo and the JS patch
-    # only fixed raster ids) and deck asserts. Both found with playwright,
-    # 2026-08-24 night. Only its table / colour traits are ever assigned,
-    # and only IN a cell run; the click highlight is a colour, not a layer.
-    HOLD["polys"] = SolidPolygonLayer(
-        table=_dummy_table(),
-        filled=True,
-        get_fill_color=np.zeros((1, 4), dtype=np.uint8),
-        pickable=False,
-    )
     deck = Map(
         layers=[],
         basemap=MaplibreBasemap(style=CartoStyle.Positron),
@@ -1054,7 +921,6 @@ def _(HudControls, mo):
 
 @app.cell
 def _(
-    A3Table,
     ACH,
     ACRES_PER_KM2,
     AEF_DS,
@@ -1065,15 +931,14 @@ def _(
     AEF_Y0,
     AEF_YEARS,
     AEF_ZMIN,
-    AGREE_LUT,
     BATCH_S,
     CDL10,
     CDL30,
     CLASSES,
     EXTENT,
     EncodedImage,
-    FTW_RES,
     FTW_ROOT,
+    FTW_RES,
     FTW_TILE_ZMAX,
     FTW_Y0,
     FTW_YEARS,
@@ -1089,19 +954,18 @@ def _(
     PANEL_MIN_AC,
     RasterLayer,
     STATES,
-    SolidPolygonLayer,
     TILE_CACHE,
     TILE_PX,
     TILE_ZMAX,
     VIEW_W,
     VIEW_ZMIN,
+    AGREE_LUT,
     YEAR0,
     albers_box,
     albers_xy,
     asyncio,
     bbox4326,
     deck,
-    ftw_tile_polys,
     ftw_tile_rings,
     hud,
     io,
@@ -1111,7 +975,6 @@ def _(
     ndimage,
     np,
     os,
-    pa,
     tempfile,
     threading,
     tile_box,
@@ -1439,74 +1302,6 @@ def _(
         return [st for st, xmin, ymin, xmax, ymax in STATES
                 if xmax > W and xmin < E and ymax > S and ymin < N]
 
-    def _poly_table(keep_r):
-        """geoarrow.polygon pyarrow table from a list of closed rings."""
-        flat = np.concatenate(keep_r)
-        ro = np.zeros(len(keep_r) + 1, dtype=np.int32)
-        ro[1:] = np.cumsum([len(r) for r in keep_r])
-        po = np.arange(len(keep_r) + 1, dtype=np.int32)
-        coords = pa.FixedSizeListArray.from_arrays(
-            pa.array(flat.ravel(), type=pa.float64()), 2)
-        ringsarr = pa.ListArray.from_arrays(pa.array(ro), coords)
-        polysarr = pa.ListArray.from_arrays(pa.array(po), ringsarr)
-        schema = pa.schema([pa.field("geometry", polysarr.type, metadata={
-            b"ARROW:extension:name": b"geoarrow.polygon"})])
-        return pa.Table.from_arrays([polysarr], schema=schema)
-
-    def _push_polys(ft, W, S, E, N):
-        """The vector fill: closed rings from the PMTiles joined to the
-        batch's fields (each ring's vertex mean into the label image). This
-        runs on the SERVE THREAD, which under marimo cannot hand the
-        frontend a new widget or an updated table (the in-place push of
-        2026-08-24 drew once at startup and never again: fills vanished on
-        every pan, seen in playwright). So it only STORES the built data and
-        pokes the HUD; the HUD's JS replies through ctl, and the "polys" act
-        below rebuilds the layer IN A CELL RUN."""
-        sig = (ft["year"], _cdl_mode, ft["fx0"], ft["fy0"], ft["lab"].shape)
-        if HOLD.get("polys_sig") == sig:
-            return
-        rings = ftw_tile_polys(_states_in(W, S, E, N), ft["fyear"],
-                               W, S, E, N, min(13, FTW_TILE_ZMAX))
-        lab = ft["lab"]
-        rgba = ft["rgba_cdl" if _cdl_mode else "rgba"]
-        keep_r, cols, fids = [], [], []
-        for r in rings:
-            m = r.mean(axis=0)
-            gx = int((m[0] + 180.0) / FTW_RES) - ft["fx0"]
-            gy = int((FTW_Y0 - m[1]) / FTW_RES) - ft["fy0"]
-            fid = 0
-            if 0 <= gy < lab.shape[0] and 0 <= gx < lab.shape[1]:
-                fid = int(lab[gy, gx])
-            if fid == 0 or rgba[fid][3] < 200:   # sit-outs stay outline-only
-                continue
-            keep_r.append(r)
-            fids.append(fid)
-            c = rgba[fid].copy()
-            c[3] = 255
-            cols.append(c)
-        if not keep_r:
-            return
-        HOLD["polys_data"] = {
-            "tbl": _poly_table(keep_r),
-            "cols": np.asarray(cols, dtype=np.uint8),
-            "fids": np.asarray(fids, dtype=np.int64),
-            "rings": keep_r,
-            "ft_key": (ft["fx0"], ft["fy0"], ft["lab"].shape),
-            "sig": sig,
-        }
-
-        def _pp():
-            try:
-                hud.widget.poke = f"{time.time():.4f}"
-            except Exception as _e:
-                _say(f"polys poke error: {type(_e).__name__}: {_e}")
-
-        _loop = HOLD.get("loop")
-        if _loop is not None:
-            _loop.call_soon_threadsafe(_pp)
-        else:
-            _pp()
-
     def _panel_html(ft):
         if _cdl_mode:
             # the CDL view: what grows in view, by acres
@@ -1562,7 +1357,6 @@ def _(
         if z >= AEF_ZMIN:
             ft = _field_table(_year, W, S, E, N)
             HOLD["ftab"] = ft
-            _push_polys(ft, W, S, E, N)
         else:
             note = f" · zoom in for the agreement paint (from z{AEF_ZMIN})"
         rings, nt = None, 0
@@ -1575,12 +1369,20 @@ def _(
         if rings:
             rb = np.array([[r[:, 0].min(), r[:, 1].min(), r[:, 0].max(), r[:, 1].max()]
                            for r in rings]) if len(rings) else np.zeros((0, 4))
-        # the tiles carry ONLY the outlines now (2026-08-24 night: the fill
-        # is the polygon layer; the raster keeps the seam-free strokes and
-        # the z12 view)
         pngs = []
         for (tW, tS, tE, tN) in boxes:
             out = np.zeros((TILE_PX, TILE_PX, 4), dtype=np.uint8)
+            if ft is not None:
+                lons = tW + (np.arange(TILE_PX) + 0.5) * (tE - tW) / TILE_PX
+                lats = tN - (np.arange(TILE_PX) + 0.5) * (tN - tS) / TILE_PX
+                LONt, LATt = np.meshgrid(lons, lats)
+                jx = ((LONt + 180.0) / FTW_RES).astype(np.int64) - ft["fx0"]
+                jy = ((FTW_Y0 - LATt) / FTW_RES).astype(np.int64) - ft["fy0"]
+                okt = (jx >= 0) & (jx < ft["lab"].shape[1]) \
+                    & (jy >= 0) & (jy < ft["lab"].shape[0])
+                lt = np.zeros((TILE_PX, TILE_PX), dtype=np.int32)
+                lt[okt] = ft["lab"][jy[okt], jx[okt]]
+                out[:] = ft["rgba_cdl" if _cdl_mode else "rgba"][lt]
             img = Image.fromarray(out, "RGBA")
             if rings:
                 hit = np.flatnonzero((rb[:, 0] < tE) & (rb[:, 2] > tW)
@@ -1683,19 +1485,12 @@ def _(
                 f'CDL says it grows · dark = they don\'t (a lead) · '
                 f'click a field for its story</span>')
 
-    def _compose_layers():
-        """polygons under, raster outlines on top. NO empty step (a removed
-        layer is closed under marimo; the raster's per-instance deck id
-        makes replacement a new layer). polys is the map cell's immortal
-        widget."""
-        deck.layers = [HOLD["polys"], HOLD["raster"]]
-
     def _rebuild():
         HOLD["batch"] = None
         HOLD["raster"] = _make_raster()
         HOLD["layer_state"] = _state
-        HOLD["polys_sig"] = None    # colours may be stale for the new state
-        _compose_layers()
+        deck.layers = []
+        deck.layers = [HOLD["raster"]]
         try:
             hud.widget.legend = _legend_html()
         except Exception:
@@ -1782,27 +1577,9 @@ def _(
     HOLD["h_vs"] = _on_vs
 
     # ---- the acts -----------------------------------------------------------
-    if _act == "polys":
-        # the serve thread's reply: update the ONE polygon layer HERE, in a
-        # cell run, in place (a trait assignment from the serve thread never
-        # reached a live frontend; creating a new widget mid-session blanked
-        # the whole deck: both found with playwright, 2026-08-24 night)
-        _pd = HOLD.get("polys_data")
-        if _pd is not None and HOLD.get("polys_sig") != _pd["sig"]:
-            try:
-                _lay = HOLD["polys"]
-                with _lay.hold_trait_notifications():
-                    _lay.table = A3Table.from_arrow(_pd["tbl"])
-                    _lay.get_fill_color = _pd["cols"]
-                HOLD["polys_sig"] = _pd["sig"]
-            except Exception as _e:
-                _say(f"polys error: {type(_e).__name__}: {_e}")
-
     if _act == "click":
-        # a click INSPECTS: the field's story into the panel, and the field
-        # itself LIT on the map (Stephen: "select the field visually"): its
-        # rings from the stored polygon data as a white overlay layer,
-        # created here in the cell run
+        # a click INSPECTS (no repaint): the field's story from the last
+        # batch's table, prepended to the panel
         try:
             _vs = _vsd(HOLD.get("vs")) or dict(HOME)
             _lon, _lat = unproject(_vs, float(_c["px"]), float(_c["py"]),
@@ -1816,32 +1593,10 @@ def _(
                 fid = 0
                 if 0 <= gy < ft["lab"].shape[0] and 0 <= gx < ft["lab"].shape[1]:
                     fid = int(ft["lab"][gy, gx])
-                _pd = HOLD.get("polys_data")
-                _pd_ok = (_pd is not None and HOLD.get("polys_sig") == _pd["sig"]
-                          and _pd["ft_key"] == (ft["fx0"], ft["fy0"], ft["lab"].shape))
                 if fid == 0:
                     HOLD["sel_html"] = ""
-                    if _pd_ok:
-                        try:
-                            HOLD["polys"].get_fill_color = _pd["cols"]
-                        except Exception:
-                            pass
                     _say(f"no FTW field at {_lat:.4f}, {_lon:.4f}")
                 else:
-                    # light the field (Stephen: "select the field visually"):
-                    # the selection is a COLOUR on the one polygon layer (a
-                    # second layer collides on deck id under marimo): the
-                    # clicked field's polygons go white, everything else
-                    # keeps its colour
-                    if _pd_ok:
-                        _m = _pd["fids"] == fid
-                        if _m.any():
-                            try:
-                                _c2 = _pd["cols"].copy()
-                                _c2[_m] = (255, 255, 255, 255)
-                                HOLD["polys"].get_fill_color = _c2
-                            except Exception as _e:
-                                _say(f"highlight error: {type(_e).__name__}: {_e}")
                     nm, hx, _nc = _cname(ft["maj"][fid])
                     ac = ft["sizes"][fid] * ft["pxa"]
                     if ft["kept"][fid] and np.isfinite(ft["agree"][fid]):
