@@ -161,6 +161,45 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   offered).
 
 
+## cdl-aef-deck.py (branch cdl-aef-deck, 2026-08-25)
+
+- The NLCD deck notebook (`x-sql-marimo/xsql-aef-nlcd-deck.py`) forked onto
+  the CDL and the FTW fields, WITHOUT the hexagons (Stephen: zoomed out you
+  see the raster, the hexagon folds were the slow part, "I don't necessarily
+  know if I wanna see them"). So: no H3, no DataFusion, no DuckDB; the whole
+  thing is xarray + numpy + scipy + its own deck.gl anywidget, and it runs
+  from this repo's venv with no new deps. No lonboard, so no JS patch.
+- Two tiers. Any zoom: the CDL raster, kernel-rendered 256-px tiles from the
+  majority pyramid (level = largest k with pixel <= 1.4 image px; windows
+  cached in 1024-px blocks per (group, level, year)), crops-only and the
+  P(field) pyramid clip as masks, the legend's selection isolates classes.
+  z12.5+ with a field paint on (`FIELD_ZOOM`, padded box <= 450 km2): the
+  field table (aef-agreement's: ndimage.label on P(field) >= 0.5 at 10 m, CDL
+  majority + purity by one bincount over `label*256+code`, LAST year's
+  majority too, mean AEF vector by 64 bincounts at 20 m stride) scored by the
+  deck notebook's prototype margin (TAU 0.05: 0.02 saturated on field means,
+  p50 1.00), drawn as kernel-rendered tiles from a per-field rgba LUT
+  (`fields-<fgen>` TileLayer; a paint change bumps the generation, deck
+  refetches, each tile is a LUT lookup + PNG). Outlines from the PMTiles are
+  drawn INTO the field tiles with PIL (no vector layer).
+- Paints (Stephen's list, 2026-08-25): CDL; agreement = CDL colour with alpha
+  by agreement, "colour by agreement" = viridis bright = agrees; "AlphaEarth
+  suggests" = the runner-up crop's colour on disagreeing fields, agreeing
+  fields quiet grey. Highlight disagreement reverses alpha / the ramp.
+- The join is positional, not keyed: the FTW 10 m grid is the frame, the CDL
+  is sampled onto it through `albers_xy` (nearest), AEF shares the lat/lon
+  pitch (a floor-divide). The click is deck's lon/lat, answered from the
+  field-id image. Real deck layer ids, one widget for the map's life.
+- Verified headless under `marimo run` + playwright (2026-08-25): cold Delta
+  fold 25 s (189 MB of AEF; ftw/label/cdl/fold all < 2 s of CPU), paints
+  switch, analyze table, click story + white highlight, zoom out to the raster
+  with both masks at z7.8, year 2023 (30 m CDL) fields in 6 s, Photon search;
+  zero console errors. NOT yet seen in Stephen's browser.
+- Not done: real FTW polygons as a vector layer (the custom widget removes the
+  lonboard reasons it failed; rasterise per polygon for the numbers), clusters,
+  the three-voter categorical paint (CDL / last year / AEF), a search zoom
+  floor when a field paint is on (Champaign lands at z11.9, under the fold).
+
 ## Open
 
 - Speed: he reports slow at high zoom too (no numbers yet); headless a cold

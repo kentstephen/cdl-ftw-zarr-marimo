@@ -39,6 +39,22 @@ detector. The panel lists the most surprising fields; clicking a field gives
 its story (CDL class, acres, what its look-alikes are). First run found an
 88 ac Delta field CDL calls Cotton whose look-alikes are Tomatoes 6/10.
 
+The fourth notebook, `cdl-aef-deck.py` (branch cdl-aef-deck, 2026-08-25): the
+same question on its own deck.gl widget (no lonboard, no JS patch, no SQL).
+Zoomed out, at any zoom, the CDL as kernel-rendered tiles from the majority
+pyramid, with crops-only and the P(field) clip as masks. Zoomed in past z12.5
+with a field paint on, each FTW field (connected component of P(field) at
+10 m) gets its CDL majority crop, last year's crop, purity and mean AEF
+vector; per view every crop with enough fields gets a prototype and a field's
+agreement is the sigmoid margin between the cosine to its own crop's
+prototype and the best other one (the NLCD deck notebook's score, on fields).
+Paints: CDL; agreement (CDL colour, alpha by agreement; colour-by-agreement
+swaps in viridis); AlphaEarth suggests (a disagreeing field takes the
+runner-up crop's colour). Click = the field's story; analyze = the per-crop
+table; year 2017-2025; Photon search. The joins are positional (index
+arithmetic on known grids, `np.bincount` as the group-by). Runs from this
+repo's venv.
+
 Data:
 
 - CDL: <https://source.coop/chill/usda-cropland-data-layer>
