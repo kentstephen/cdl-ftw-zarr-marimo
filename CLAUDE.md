@@ -59,7 +59,7 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   theorising about a session, `ps -axo command | grep marimo` and look at the
   interpreter path. The three edits: (1) the tile mesh fragment shader calls
   `lighting_getLightColor`, ~0.69x on every channel, `opacity` ignored, no
-  Python prop reaches it; without it the colours are wrong (a protan-safe
+  Python prop reaches it; without it the colors are wrong (a protan-safe
   palette drawn dark). (2) `getTileData` gives the kernel TEN SECONDS per tile
   request (`timeout:1e4`); past that the JS drops the tile and deck never asks
   again, so a batch over 10 s (a fly-to into a cold region) left the map blank
@@ -96,7 +96,7 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   every layer is created in the map cell and lives forever, only traits are
   assigned; TWO vector layers collide on deck id "undefined-0" (model_id is
   undefined under marimo; the JS patch fixed raster ids only) and deck asserts
-  -> one vector layer, selection is a colour, not a layer. Frontend verification:
+  -> one vector layer, selection is a color, not a layer. Frontend verification:
   `uv run marimo edit <nb> --headless --port N --no-token` + playwright
   (chromium installed), click run-all at (1558, 924) in a 1600x1000 viewport,
   wait ~75 s cold, screenshot the big canvas; HUD text lives in a shadow root
@@ -147,7 +147,7 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   null without tileMatrices), so the map was blank with no error anywhere. If
   the map is ever blank while the status shows batches, check the TMS first.
 - Verified 2026-08-20 night in this venv: TMS with boundingBox + the unlit
-  patch -> tile colours equal the reference (255 -> 255, 150 -> 152).
+  patch -> tile colors equal the reference (255 -> 255, 150 -> 152).
 
 ## Controls added 2026-08-21 evening
 
@@ -182,9 +182,9 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   (`fields-<fgen>` TileLayer; a paint change bumps the generation, deck
   refetches, each tile is a LUT lookup + PNG). Outlines from the PMTiles are
   drawn INTO the field tiles with PIL (no vector layer).
-- Paints (Stephen's list, 2026-08-25): CDL; agreement = CDL colour with alpha
-  by agreement, "colour by agreement" = viridis bright = agrees; "AlphaEarth
-  suggests" = the runner-up crop's colour on disagreeing fields, agreeing
+- Paints (Stephen's list, 2026-08-25): CDL; agreement = CDL color with alpha
+  by agreement, "color by agreement" = viridis bright = agrees; "AlphaEarth
+  suggests" = the runner-up crop's color on disagreeing fields, agreeing
   fields quiet grey. Highlight disagreement reverses alpha / the ramp.
 - The join is positional, not keyed: the FTW 10 m grid is the frame, the CDL
   is sampled onto it through `albers_xy` (nearest), AEF shares the lat/lon

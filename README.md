@@ -48,9 +48,9 @@ with a field paint on, each FTW field (connected component of P(field) at
 vector; per view every crop with enough fields gets a prototype and a field's
 agreement is the sigmoid margin between the cosine to its own crop's
 prototype and the best other one (the NLCD deck notebook's score, on fields).
-Paints: CDL; agreement (CDL colour, alpha by agreement; colour-by-agreement
+Paints: CDL; agreement (CDL color, alpha by agreement; color-by-agreement
 swaps in viridis); AlphaEarth suggests (a disagreeing field takes the
-runner-up crop's colour). Click = the field's story; analyze = the per-crop
+runner-up crop's color). Click = the field's story; analyze = the per-crop
 table; year 2017-2025; Photon search. The joins are positional (index
 arithmetic on known grids, `np.bincount` as the group-by). Runs from this
 repo's venv.

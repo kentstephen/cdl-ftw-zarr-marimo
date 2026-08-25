@@ -33,11 +33,13 @@ paint on), the unit becomes THE FIELD:
      to the best other prototype (the NLCD deck notebook's score, on fields
      instead of hexagons). The runner-up is what "AlphaEarth suggests",
      relative to the crops in THIS view, not a classification.
-  4. Paints, one at a time: CDL (each field its majority crop's colour);
-     agreement (the CDL colour, alpha follows agreement; "colour by
-     agreement" swaps in viridis, BRIGHT = agrees, dark = a lead);
-     AlphaEarth suggests (a disagreeing field takes the runner-up crop's
-     colour, agreeing fields go quiet). Highlight disagreement reverses.
+  4. Paints, one at a time: CDL (each field its majority crop's color);
+     agreement (the CDL color, alpha follows agreement); color by agreement
+     (viridis, BRIGHT = agrees, dark = a lead); AlphaEarth suggests (a
+     disagreeing field takes the runner-up crop's color, agreeing fields go
+     quiet). Highlight disagreement reverses. The CDL raster does not draw
+     under the fields (a faded field fades to the basemap). A click outlines
+     the field in gold; the same field again, or the basemap, clears it.
 
 The map is its OWN deck.gl widget (the NLCD deck notebook's chassis, hexagon
 layers removed): maplibre + deck interleaved under the labels, two TileLayers
@@ -134,10 +136,10 @@ def _(mo):
     prototype, and a field's *agreement* is how much closer its vector sits to
     its own crop's prototype than to the best other one.
 
-    - **CDL** paint: each field its majority crop's colour.
-    - **agreement** paint: the CDL colour, alpha follows agreement; *colour by
-      agreement* swaps in viridis (bright = agrees, dark = a lead).
-    - **AlphaEarth suggests** paint: a disagreeing field takes the colour of the
+    - **CDL** paint: each field its majority crop's color.
+    - **agreement** paint: the CDL color, alpha follows agreement.
+    - **color by agreement** paint: viridis on the agreement (bright = agrees, dark = a lead).
+    - **AlphaEarth suggests** paint: a disagreeing field takes the color of the
       crop AlphaEarth puts it closest to (relative to this view); agreeing fields
       go quiet grey.
 
@@ -1330,13 +1332,16 @@ def _(
     blank_png,
     cname,
     io,
+    ndimage,
     np,
     tile_box,
 ):
     # ---- the field paints: one rgba LUT by field id, and the tiles drawn from it
-    def field_fill(ft, paint, sel, hit=None, inv=False, acol=False):
-        """(nlab+1, 4) uint8 rgba by field id for a paint. Fields that sit out
-        (tiny, non-crop, no embedding) are faint grey; id 0 is transparent."""
+    def field_fill(ft, paint, sel, inv=False):
+        """(nlab+1, 4) uint8 rgba by field id for a paint (cdl, agreement,
+        viridis, suggests). Fields that sit out (tiny, non-crop, no embedding)
+        are faint grey; id 0 is transparent. The picked field is NOT here: it
+        keeps its color and gets a gold outline in the tile."""
         n = ft["nlab"] + 1
         maj, alt, agree, kept, scored = ft["maj"], ft["alt"], ft["agree"], ft["kept"], ft["scored"]
         rgba = np.zeros((n, 4), dtype=np.uint8)
@@ -1347,20 +1352,20 @@ def _(
             rgba[kept, :3] = CLASS_RGB[maj[kept]]
             rgba[kept, 3] = ALPHA_FLAT
             key = maj.astype(np.int64)
-        elif paint == "agreement":
-            if acol:
-                idx = (a01 * 255).astype(np.int64)
-                lut = AGREE_LUT[255 - idx] if inv else AGREE_LUT[idx]
-                rgba[kept, :3] = np.where(scored[kept, None], lut[kept], 128)
-                rgba[kept, 3] = ALPHA_RAMP
-            else:
-                rgba[kept, :3] = CLASS_RGB[maj[kept]]
-                t = (1 - a01) if inv else a01
-                al = (ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * t).astype(np.uint8)
-                al = np.where(scored, al, ALPHA_MIN if inv else ALPHA_MAX).astype(np.uint8)
-                rgba[kept, 3] = al[kept]
+        elif paint == "viridis":
+            idx = (a01 * 255).astype(np.int64)
+            lut = AGREE_LUT[255 - idx] if inv else AGREE_LUT[idx]
+            rgba[kept, :3] = np.where(scored[kept, None], lut[kept], 128)
+            rgba[kept, 3] = ALPHA_RAMP
             key = maj.astype(np.int64)
-        else:  # "suggests": the runner-up crop's colour where AEF disagrees
+        elif paint == "agreement":
+            rgba[kept, :3] = CLASS_RGB[maj[kept]]
+            t = (1 - a01) if inv else a01
+            al = (ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * t).astype(np.uint8)
+            al = np.where(scored, al, ALPHA_MIN if inv else ALPHA_MAX).astype(np.uint8)
+            rgba[kept, 3] = al[kept]
+            key = maj.astype(np.int64)
+        else:  # "suggests": the runner-up crop's color where AEF disagrees
             dis = scored & (agree < 0.5) & (alt >= 0)
             quiet = kept & ~dis
             rgba[quiet, :3] = QUIET
@@ -1372,14 +1377,12 @@ def _(
             keep = np.isin(key, list(sel))
             rgba[kept & ~keep, 3] = DIM_ALPHA
         rgba[0] = 0
-        if hit is not None and 0 < hit < n:
-            rgba[hit] = (255, 255, 255, 255)
         return rgba
 
-    def legend_for(ft, paint, acol=False, inv=False):
+    def legend_for(ft, paint, inv=False):
         maj, alt, agree, kept, scored = ft["maj"], ft["alt"], ft["agree"], ft["kept"], ft["scored"]
         items = []
-        if paint == "agreement" and acol and ft["nscored"]:
+        if paint == "viridis" and ft["nscored"]:
             items.append({"ramp": RAMP_HEX, "cmap": "viridis",
                           "lo": "agrees" if inv else "disagrees", "hi": "disagrees" if inv else "agrees"})
         if paint == "suggests":
@@ -1402,25 +1405,35 @@ def _(
                           "note": "" if len(a) else "(unscored)"})
         return items
 
-    def field_tile_png(ft, rgba, rings, z, x, y):
+    GOLD = (255, 200, 40, 255)
+    HIT_PAD, HIT_W = 6, 3   # lattice pad (px) so the outline erosion sees past the seam; outline width
+
+    def field_tile_png(ft, rgba, rings, z, x, y, hit=None):
         """PNG for tile (z, x, y) from the field-id image and the paint LUT;
-        outline polylines drawn on top with PIL."""
+        outline polylines drawn on top with PIL; the picked field (`hit`) gets
+        a gold outline, its fill unchanged."""
         W, S, E, N = tile_box(z, x, y)
         bW, bS, bE, bN = ft["box"]
         if E < bW or W > bE or N < bS or S > bN or E < EXTENT[0] or W > EXTENT[2]:
             return blank_png()
-        T = RASTER_TILE
-        lons = W + (np.arange(T) + 0.5) * (E - W) / T
-        lats = N - (np.arange(T) + 0.5) * (N - S) / T
+        T, P = RASTER_TILE, HIT_PAD
+        lons = W + (np.arange(-P, T + P) + 0.5) * (E - W) / T
+        lats = N - (np.arange(-P, T + P) + 0.5) * (N - S) / T
         jx = np.floor((lons + 180.0) / FTW_RES).astype(np.int64) - ft["fx0"]
         jy = np.floor((FTW_Y0 - lats) / FTW_RES).astype(np.int64) - ft["fy0"]
         lab = ft["lab"]
         okx = (jx >= 0) & (jx < lab.shape[1])
         oky = (jy >= 0) & (jy < lab.shape[0])
-        ids = np.zeros((T, T), dtype=np.int32)
+        ids = np.zeros((T + 2 * P, T + 2 * P), dtype=np.int32)
         if okx.any() and oky.any():
             ids[np.ix_(oky, okx)] = lab[np.ix_(jy[oky], jx[okx])]
         out = rgba[ids]
+        if hit is not None and hit > 0:
+            hm = ids == hit
+            if hm.any():
+                edge = hm & ~ndimage.binary_erosion(hm, iterations=HIT_W, border_value=1)
+                out[edge] = GOLD
+        out = out[P:P + T, P:P + T]
         img = Image.fromarray(np.ascontiguousarray(out), "RGBA")
         if rings:
             rb = rings["bounds"]
@@ -1446,7 +1459,7 @@ def _(anywidget, traitlets):
         """The strip under the map (the NLCD deck notebook's, reworked): the
         raster switches (CDL raster, crops only, fields clip), the field paint
         (one of CDL / agreement / AlphaEarth suggests, or none), its modifiers
-        (highlight disagreement, colour by agreement, outlines), the year, the
+        (highlight disagreement, color by agreement, outlines), the year, the
         pickable legend, analyze, labels, search; panel and status lines. The
         one element docks into the map's fullscreen."""
 
@@ -1473,12 +1486,12 @@ def _(anywidget, traitlets):
             b.style.fontWeight = on ? "600" : "400";
           };
           let paint = "agreement";
-          let raster = true, crops = false, clip = false, outlines = true, acol = false;
+          let raster = true, crops = false, clip = false, outlines = true;
           const sel = new Set();
           let seq = 0;
           const send = (act, extra) => {
             model.set("ctl", JSON.stringify(Object.assign({
-              act: act, paint: paint, sel: Array.from(sel), inv: inv.checked, acol: acol,
+              act: act, paint: paint, sel: Array.from(sel), inv: inv.checked,
               raster: raster, crops: crops, clip: clip, outlines: outlines,
               year: parseInt(yearSel.value, 10), n: ++seq }, extra || {})));
             model.save_changes();
@@ -1524,20 +1537,16 @@ def _(anywidget, traitlets):
             return [key, b];
           };
           const paintBtns = [
-            mkPaint("cdl", "CDL", "each field its CDL majority crop's colour (z12.5+); click again to hide"),
-            mkPaint("agreement", "agreement", "the CDL colour, alpha follows how well AlphaEarth backs the crop (z12.5+); click again to hide"),
-            mkPaint("suggests", "AlphaEarth suggests", "a disagreeing field takes the colour of the crop AlphaEarth puts it closest to, relative to this view; agreeing fields go quiet (z12.5+); click again to hide"),
+            mkPaint("cdl", "CDL", "each field its CDL majority crop's color (z12.5+); click again to hide"),
+            mkPaint("agreement", "agreement", "the CDL color, alpha follows how well AlphaEarth backs the crop (z12.5+); click again to hide"),
+            mkPaint("viridis", "color by agreement", "viridis on the agreement value: bright = agrees, dark = a lead (z12.5+); click again to hide"),
+            mkPaint("suggests", "AlphaEarth suggests", "a disagreeing field takes the color of the crop AlphaEarth puts it closest to, relative to this view; agreeing fields go quiet (z12.5+); click again to hide"),
           ];
           const [invLab, inv] = mkChk("highlight disagreement", "agreement: reverse (the least-backed fields solid, the agreeing ones faint)", false, () => send("set"));
-          const acB = document.createElement("button");
-          acB.textContent = "colour by agreement"; acB.style.cssText = btnCss;
-          acB.title = "agreement: viridis on the agreement value (bright = agrees, dark = a lead) instead of the CDL colour";
-          const styleAc = () => { onCss(acB, acol); acB.style.opacity = paint === "agreement" ? "1" : ".5"; };
-          acB.onclick = () => { acol = !acol; styleAc(); send("set"); };
           const [outLab] = mkChk("outlines", "field outlines from the FTW PMTiles, drawn on the field tiles", outlines, (v) => { outlines = v; send("set"); });
-          const stylePaint = () => { paintBtns.forEach(([k, b]) => onCss(b, k === paint)); styleAc(); };
+          const stylePaint = () => { paintBtns.forEach(([k, b]) => onCss(b, k === paint)); };
           stylePaint();
-          paintBox.append(pl, ...paintBtns.map(([, b]) => b), invLab, acB, outLab);
+          paintBox.append(pl, ...paintBtns.map(([, b]) => b), invLab, outLab);
           const legendBox = document.createElement("div");
           legendBox.style.cssText =
             "display:flex;flex-wrap:wrap;align-items:center;" +
@@ -1561,7 +1570,7 @@ def _(anywidget, traitlets):
               if (it.ramp) {
                 const r = document.createElement("span");
                 r.style.cssText = "display:inline-flex;align-items:center;gap:.35rem;font:12px ui-sans-serif,system-ui,sans-serif";
-                r.title = it.cmap + ": colour by agreement";
+                r.title = it.cmap + ": color by agreement";
                 r.innerHTML =
                   '<span style="opacity:.75">' + it.lo + '</span>' +
                   '<span style="display:inline-block;width:9rem;height:10px;border-radius:2px;' +
@@ -1800,7 +1809,9 @@ def _(anywidget, asyncio, traitlets):
               tileSize: cfg.tile || 256,
               minZoom: 3, maxZoom: 15,
               extent: cfg.extent || null,
-              visible: cfg.raster !== false,
+              // off while the fields draw: a faded field must fade to the basemap,
+              // not to the same CDL color underneath
+              visible: cfg.raster !== false && !cfg.fields_on,
               refinementStrategy: "no-overlap",
               beforeId: cfg.labels_slot || "watername_ocean",
               renderSubLayers: sub,
@@ -1898,7 +1909,7 @@ def _(DeckMap, EXTENT, HOLD, HOME, LABELS_SLOT, RASTER_TILE, YEAR0, json):
     HOLD.update({
         "ft": None, "box": None, "vs": None, "busy": False, "pending": None, "task": None, "loop": None,
         "year": YEAR0, "paint": "agreement", "raster": True, "crops": False, "clip": False,
-        "outlines": True, "inv": False, "acol": False, "labels": True,
+        "outlines": True, "inv": False, "labels": True,
         "sel": set(), "hit": None, "rings": None, "rgba": None, "rgen": 0, "fgen": 0,
         "tiles": {}, "h_cam": None, "h_ctl": None, "h_pick": None,
     })
@@ -1996,7 +2007,7 @@ def _(
             key = ("f", HOLD["fgen"], z, x, y)
             if key not in _tiles:
                 png = await asyncio.get_running_loop().run_in_executor(
-                    _pool, lambda: field_tile_png(ft, rgba, rings if HOLD["outlines"] else None, z, x, y))
+                    _pool, lambda: field_tile_png(ft, rgba, rings if HOLD["outlines"] else None, z, x, y, HOLD["hit"]))
                 _tiles[key] = png
         if len(_tiles) > 4000:
             for _k in list(_tiles)[:800]:
@@ -2025,11 +2036,11 @@ def _(
         ft = HOLD["ft"]
         if ft is None:
             return
-        HOLD["rgba"] = field_fill(ft, HOLD["paint"], HOLD["sel"], HOLD["hit"], HOLD["inv"], HOLD["acol"])
+        HOLD["rgba"] = field_fill(ft, HOLD["paint"], HOLD["sel"], HOLD["inv"])
         HOLD["fgen"] += 1
         _cfg(fields_on=True, fbox=list(ft["box"]), fgen=HOLD["fgen"])
         try:
-            hud.widget.legend = json.dumps(legend_for(ft, HOLD["paint"], HOLD["acol"], HOLD["inv"]))
+            hud.widget.legend = json.dumps(legend_for(ft, HOLD["paint"], HOLD["inv"]))
         except Exception:
             pass
 
@@ -2289,7 +2300,6 @@ def _(
         sel_was = set(HOLD["sel"])
         HOLD["sel"] = {int(x) for x in c.get("sel", [])}
         HOLD["inv"] = bool(c.get("inv", False))
-        HOLD["acol"] = bool(c.get("acol", False))
         HOLD["outlines"] = bool(c.get("outlines", True))
         raster_was = (HOLD["raster"], HOLD["crops"], HOLD["clip"])
         HOLD["raster"] = bool(c.get("raster", True))
