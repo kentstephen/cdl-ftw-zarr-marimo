@@ -167,88 +167,143 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   the CDL and the FTW fields, WITHOUT the hexagons (Stephen: zoomed out you
   see the raster, the hexagon folds were the slow part, "I don't necessarily
   know if I wanna see them"). So: no H3, no DataFusion, no DuckDB; xarray +
-  numpy + scipy, runs from this repo's venv with no new deps.
-- CHASSIS: lonboard RasterLayer + the JS patch (first cell) + cdl-ftw.py's
-  whole-view batch serve + aef-agreement.py's HUD canvas click. The first
-  build (b970d50..0693f27) was a custom deck.gl anywidget with two
-  TileLayers; Stephen: "lets go back to the lonboard and patch ... i think we
-  got that smoother" (the per-tile custom-message round trip was rougher than
-  one batch per view). The wiring cell re-runs on every HUD commit; every act
-  happens in the run; ONE RasterLayer rebuilt as a NEW layer when the state
-  tuple changes (year, paint, raster, crops, clip, outlines, inv, sel, hit).
-- Two tiers by TILE zoom. Below AEF_ZMIN (13): the CDL raster (level =
-  largest k with pixel <= 1.4 image px; windows cached in 1024-px blocks per
-  (group, level, year)), crops-only and the P(field) pyramid clip as masks,
-  outlines from z12, the legend from the batch's class counts (click a class
-  to isolate). From z13 with a field paint on: the field table over the
-  batch's union box (aef-agreement's: ndimage.label on P(field) >= 0.5 at
-  10 m, CDL majority + purity by one bincount over `label*256+code`, LAST
-  year's majority too, mean AEF vector by 64 bincounts at 20 m stride; cached
-  by chunk-aligned box + year) scored by the deck notebook's prototype margin
-  (TAU 0.05: 0.02 saturated on field means), drawn from a per-field rgba LUT;
-  the CDL raster is NOT drawn under the fields (a faded field must fade to
-  the basemap). Prototypes are per batch, so a pan can nudge scores.
-- Paints: CDL; "color by agreement" = viridis, bright = agrees, the default;
-  "AlphaEarth suggests" = the runner-up crop's color on disagreeing fields,
-  agreeing fields quiet grey. Highlight disagreement reverses the ramp. The
-  "agreement" paint (CDL color, alpha by agreement) is COMMENTED OUT in the
-  strip: near-binary scores (92 % of fields at ~1) made it read as plain CDL
-  ("how is agreement helpful (its not)"); its field_fill branch stays. Each
-  paint is its own button, none greyed out (a dimmed modifier button was
-  hated). The click: gold OUTLINE on the field (not a white fill: "if it
-  disappears, you don't know what you're looking at"), same field again or
-  the basemap clears it. Spelling: color, not colour.
-- The join is positional, not keyed: the FTW 10 m grid is the frame, the CDL
-  is sampled onto it through `albers_xy` (nearest), AEF shares the lat/lon
-  pitch (a floor-divide). Compute is ~0.5-1 s per cold box; the AEF chunks
-  (4 MB each, 20-40 per view) are the cost.
-- The strip initialises from the kernel's LAST ctl (a page reload rebuilds
-  the JS; before, "fields clip" showed unchecked while the kernel served it
-  clipped).
-- Verified headless under `marimo run` + playwright (2026-08-25, the lonboard
-  build): first z13 batch 5.3 s (1,619 crop fields, 566 MB of AEF), paint
-  switches ~55 ms from the cached table, click story + gold outline, year
-  2023 in 2.5 s, zoom out to the raster with both masks; no console errors.
-  Stephen ran the deck-widget build in his browser; the lonboard build he
-  has not yet.
-- Not done: real FTW polygons as a vector layer, clusters, the three-voter
-  categorical paint (CDL / last year / AEF), a search zoom floor.
-- STEPHEN'S REPORTS on the lonboard build in HIS browser (2026-08-25, after
-  e82a293), NOT yet fixed, reproduce first:
-  1. "now there is a delay for data load": the batch box is the view + 35 %
-     margin (566 MB of AEF at z13 vs 189 MB in the deck-widget build) and the
-     CDL block reads are serial (cdl 4.2 s in the status). Planned: MARGIN
-     0.15, parallel block reads in cdl_window.
-  2. "fields come clipped": read as the aef-agreement seam problem (a pan's
-     new batch builds a new table over a new box; tiles from the old batch
-     stay in deck with fields cut at the old box edge, next to new tiles with
-     per-batch colors). Planned: build the field table over the batch box
-     padded by one FTW chunk (512 px, ~4.6 km) and REUSE it for every later
-     batch whose union box fits inside (contains check), so pans inside one
-     box share one table; a new table only when the view leaves it. Could
-     also mean "only the fields draw, the CDL raster is gone under them":
-     that is by design since the alpha-paint complaint; ask.
-  3. "also lost picking": the click does nothing for him. The canvas click
-     goes through the HUD's ctl (aef-agreement's onClick on the map CANVAS
-     via composedPath, a 5-px drag guard) and the wiring cell's `click` act
-     unprojects with HOLD["vs"]; headless it worked (gold outline + story,
-     s9_click.png). Reproduce in HIS session: check the kernel was restarted
-     after e82a293 (`ps -axo command | grep marimo`), check ctl arrives
-     (status line says "no field at ..." on a basemap click if it does), and
-     that HOLD["ftab"] exists (the click needs a served z13 batch with a field
-     paint on; before that it says "no fields on").
-  Rule, restated: talk before changing basic concepts; verify in HIS browser
-  before claiming a fix.
+  numpy + scipy + pyarrow, runs from this repo's venv. lonboard, morecantile
+  and the JS patch are OUT of this notebook (cdl-ftw.py still uses them).
+- CHASSIS (third, 2026-08-25 evening, the plan in
+  `docs/deck-geoarrow-fields-plan.md`, executed): a `DeckMap` anywidget, the
+  HRRR counties film's pinned esm.sh graph (deck.gl 9.3.10 + maplibre 5.24,
+  every `?deps` per package identical so ONE @deck.gl/core resolves) with the
+  0693f27 build's boot (Carto Positron, interleaved MapboxOverlay, layers
+  under `watername_ocean`). Traits: `config` JSON kernel -> browser; `fields`
+  / `lines` / `colors` bytes kernel -> browser; `view` (moveend, lon/lat/zoom
+  + canvas w/h) and `pick` browser -> kernel; custom messages `tile` (PNG
+  back) and `fly`. The HUD strip is unchanged except its canvas click is
+  gone (the map picks). History: lonboard RasterLayer build e82a293..3448d2b
+  (Stephen's three reports on it: load delay, fields clipped at batch seams,
+  lost picking; the seam and the pick are structural there, see the plan);
+  the first deck widget with two TileLayers b970d50..0693f27.
+- ONE FIELDS SWITCH (Stephen, 2026-08-25 evening: "just keep one button for
+  field boundaries ... have it selected ... when you zoom in, it clips to
+  the fields, but it can be unselected ... but that's only past z14,
+  otherwise we see all of CDL unless crops are masked"). "fields clip" and
+  "outlines" are gone. Below camera FIELD_ZOOM (14): the raw CDL, crops-only
+  optional, nothing field-related (the old clip-at-every-zoom blanks are
+  gone with it). From z14, switch ON = the raster clipped to P(field) + the
+  outlines (no paint) or the painted polygons over the basemap (a paint);
+  switch OFF = the raw CDL, drawn UNDER the painted polygons too ("maybe
+  there's disconnect with the fields and what alpha earth thinks is there").
+  Kernel: `_fields` -> `_clip = _outlines`, gated in `_serve_batch` on tile
+  z >= FIELD_TILE_Z (15 = camera 14; tile z = round(camera + 1) with 256-px
+  tiles, which is why the status line's z runs one ahead of the camera);
+  config `under` shows the TileLayer beneath the polygons.
+- Two tiers by CAMERA zoom. Below FIELD_ZOOM (14; z12 and z13 "gave no
+  context for most fields of what it could be"): the CDL raster as a deck
+  `TileLayer` (`cdl-<rgen>`; a new rgen on a raster state change makes deck
+  refetch) whose PNGs the kernel renders ONE BATCH PER VIEW (cdl-ftw's
+  `_fetch`: the first request waits BATCH_S, the batch takes the whole view's
+  tiles at that zoom, one grid, PNGs cached by `(rstate, z, x, y)`), the
+  legend from the batch's class counts. deck fetches the HIDDEN raster
+  layer's tiles too, so a raster state change may find every tile cached
+  and produce no batch: the status line is composed at display time
+  (`_raster_line`: the cached bare line + why the fields are off) and said
+  on every raster state change. From camera z14 with a
+  field paint on: the FIELDS ARE POLYGONS. `_serve_fields` (an asyncio task,
+  settle-debounced SETTLE 0.35 s, coalescing): the field table over the view
+  padded by PAD 1.15 (aef-agreement's positional join, unchanged), the FTW
+  PMTiles' z13 tiles under that box decoded to closed rings with holes
+  (`ftw_tile_polys`: MVT winding, exterior = positive area in tile coords;
+  every ring CLIPPED to the tile box, `_clip_ring`, because tippecanoe's
+  buffer put ~100 m of every piece in the neighbour tile too and two fills
+  read as dark bands), each polygon keyed to its field id by sampling the
+  label grid at its centroid (`poly_fids`, vertex-mode fallback), one Arrow
+  IPC table (`polys_ipc`: geoarrow.polygon interleaved f64 + fid int32 +
+  rgba) on a `GeoArrowPolygonLayer`, the outline polylines a second IPC
+  table on a PathLayer. A pan INSIDE the padded box costs nothing (contains
+  check); leaving it re-serves (table cached by chunk-aligned box, tiles
+  from memory/disk). The CDL TileLayer is hidden while the fields draw
+  (unless the fields switch is off).
+- HOME is Stephen's box (`HOME_BOX`, Bethel Island to Stockton, from
+  boundingbox.klokantech.com) fitted to the canvas: camera z10.71. THEN
+  (2026-08-25 night, "i want to start here", a screenshot at tile z11 =
+  camera ~z10, the whole Delta from Rio Vista and Antioch to Lodi and
+  Stockton, wider than HOME_BOX) and he set FIELD_ZOOM = 11 himself. NOT
+  done, no coding asked: a HOME_BOX for that vantage (roughly -121.95..
+  -121.05, 37.75..38.35), and the fields at camera z10-11 need
+  FIELD_MAX_KM2 raised (that view is ~4,800 km2 padded, the cap is 1,500)
+  with a cold AEF read of ~3 GB for the box the first time; the polygons at
+  z11 are ~70 tiles / ~7,000 rings / ~3.5 MB (measured in the plan), fine.
+  The context-box question (prototypes over a big fixed area) is the same
+  question from the other side.
+- Open question he raised: the prototypes are per served box (view + 15 %),
+  so at z14 few crops reach 20 fields; "looking at an area this large would
+  be helpful for aef context". Directions offered, none chosen: a fixed
+  context box (HOME_BOX) scored once; a much wider PAD at high zoom; a
+  "score this area" button. The draw zoom and the context box are coupled
+  today.
+- Paint switch / highlight / legend isolate = `_recolor`: rgba LUT by field
+  id -> one bytes trait of N x 4, recolored in JS, no geometry reload, no
+  round trip for tiles. Year change and refresh = a forced re-serve.
+- THE PICK is in the browser: pointerup (a press on a map control or one
+  that moves > 4 px is not a click), `map.unproject`, bbox reject, even-odd
+  over the rings the browser holds -> the polygon's fid; the JS toggles the
+  gold PathLayer on every piece with that fid itself, then sets `pick`
+  ({i, fid, on, lon, lat, gen}); the kernel's observer writes the story to
+  the panel (ignores a pick whose gen is not the current table's). deck's
+  GPU picking is not used anywhere (never worked under marimo).
+- Acts are applied ONCE per ctl (`n` compared to HOLD["ctl_n"]): a re-run
+  of the wiring cell for any other reason does not repeat the last click.
+- Verified headless 2026-08-25 evening (`marimo edit --headless` + playwright,
+  the Delta at cam z12.6): cold field serve 1.8-2.6 s (table 1.7 s of it:
+  cdl 1.1 with the parallel block reads, aef 264 MB from disk 0.1), 973
+  polygons 0.9 MB; click -> story + gold in ~1 s; paint/highlight/outlines
+  instant; a pan out of the box 0.6 s; year 2023 1.1 s; zoom out to the
+  raster and back 0.9 s; no console errors on the last run ("Model not found
+  for key" x2 appeared once on an earlier run-all with no visible effect).
+  NOT yet run in Stephen's browser: his `uv run marimo edit cdl-aef-deck.py`
+  kernel must be restarted to pick this up.
+- TODO (Stephen, 2026-08-25 night, not now): on a zoom in with the fields
+  switch on, the fields JUDDER from CDL colors to the agreement paint: the
+  clipped CDL raster tiles (the raster tier at the new tile zoom) show first,
+  then the polygons replace them. "Should just render as agreement": the
+  raster must not draw its field-tier tiles while a paint is on and the
+  polygons are coming (hide the TileLayer from FIELD_ZOOM whenever a paint
+  is on, or keep the last polygon layer up until the new table lands). Also
+  from him: the toggle between the layers (raster tier <-> field tier, and
+  the paint buttons) is JUMPY and sometimes REVERTS (a switch lands, then
+  the previous state comes back). Not reproduced headless; suspects: the
+  settle-debounced serve racing a ctl run (`_kick` vs `_refresh` with
+  HOLD["pending"]), a stale `last ctl` re-initialising the strip, or a
+  raster batch's `_push` landing after `_fields_off`. Reproduce in HIS
+  browser first.
+- TODO (Stephen, 2026-08-25 night, not now): a better field-boundary STROKE
+  for disagreement, "maybe the same color as the boundary": the disagreeing
+  fields (agreement < 0.5) outlined with a heavier stroke in the outline
+  color rather than, or as well as, the fill ramp. The outlines are a
+  PathLayer of the PMTiles polylines with no field id today, so the stroke
+  would come from the polygon layer (stroked, getLineColor / getLineWidth
+  per polygon from the fid, the tile-clip segments then visible as lines
+  across the cut fields) or from a per-fid line table built with the fills.
+  Colorblind rule: the stroke must not be a red-vs-green distinction.
+- Open on this chassis: the tile-edge pieces (a field across two z13 tiles is
+  two polygons with one fid; fills and the pick do not care; the gold outline
+  shows the seam as a line across the field), three routes in the plan doc,
+  none chosen. A cold region is the AEF read (Champaign: 12 s of a 16 s
+  table for 0.02 deg^2). Not done: clusters, the three-voter categorical
+  paint, a search zoom floor, an area selection (shift-click set or box).
+- Paints, join, strip lessons unchanged from before: CDL / "color by
+  agreement" (viridis, bright = agrees, the default) / "AlphaEarth suggests";
+  the alpha "agreement" paint stays commented out; no greyed-out buttons;
+  gold outline not a white fill; color not colour; the strip initialises
+  from the kernel's last ctl.
 
 ## Open
 
-- Speed: he reports slow at high zoom too (no numbers yet); headless a cold
-  whole-view batch at z13 is 0.6-0.8 s, pans 0.2-1.3 s; the per-tile widget
-  round trip (45 messages, 6 in flight) is the floor on every state change.
-  512 px tiles would cut that by 4. The low-zoom clip floor is undecided.
-- One layer for the Map's life with a reload trigger (a `_gen` trait wired to
-  `updateTriggers.getTileData` in the JS patch) instead of a rebuild per toggle
-  would remove the remove/add flash and the model-lifetime dependence; not done.
+- Speed on cdl-ftw.py (lonboard): the per-tile widget round trip (45
+  messages, 6 in flight) is the floor on every state change; 512 px tiles
+  would cut that by 4. The low-zoom clip floor is undecided.
+- cdl-ftw.py: one layer for the Map's life with a reload trigger instead of a
+  rebuild per toggle would remove the remove/add flash; not done (cdl-aef-deck
+  has that: `rgen` in the TileLayer id).
 - Judge rendering by screenshots, never console errors; the status line's ms
   is the serve time, not the browser fill.
 - Picking (which dataset says what at a point): geometric in JS, not deck's.

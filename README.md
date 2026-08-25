@@ -40,26 +40,35 @@ its story (CDL class, acres, what its look-alikes are). First run found an
 88 ac Delta field CDL calls Cotton whose look-alikes are Tomatoes 6/10.
 
 The fourth notebook, `cdl-aef-deck.py` (branch cdl-aef-deck, 2026-08-25): the
-same question with the NLCD deck notebook's score, on the `cdl-ftw.py`
-chassis (lonboard RasterLayer, the JS patch, the whole-view batch serve, the
-HUD canvas click). Zoomed out, at any zoom, the CDL as kernel-rendered tiles
-from the majority pyramid, with crops-only and the P(field) clip as masks.
-From tile z13 with a field paint on, each FTW field (connected component of
-P(field) at 10 m) gets its CDL majority crop, last year's crop, purity and
-mean AEF vector; per batch every crop with 20+ fields gets a prototype and a
-field's agreement is the sigmoid margin between the cosine to its own crop's
-prototype and the best other one. Paints: CDL; color by agreement (viridis,
-bright = agrees); AlphaEarth suggests (a disagreeing field takes the
-runner-up crop's color). Click = the field's story and a gold outline;
-analyze = the per-crop table; year 2017-2025; Photon search. No SQL: the
-joins are positional (index arithmetic on known grids, `np.bincount` as the
-group-by). Runs from this repo's venv.
+same question with the NLCD deck notebook's score, on its own deck.gl
+anywidget (deck.gl 9.3.10 + maplibre from esm.sh; no lonboard, no JS patch on
+this notebook). Zoomed out, the CDL as kernel-rendered tiles from the majority
+pyramid (one batch per view), with crops-only as a mask. From camera
+`FIELD_ZOOM` with a field paint on, the fields are POLYGONS: the FTW PMTiles
+decoded to rings, each keyed to its P(field) connected component by sampling
+the label grid, shipped as one GeoArrow table; each field gets its CDL
+majority crop, last year's crop, purity and mean AEF vector; per box every
+crop with 20+ fields gets a prototype and a field's agreement is the sigmoid
+margin between the cosine to its own crop's prototype and the best other one.
+Paints: CDL; color by agreement (viridis, bright = agrees); AlphaEarth
+suggests (a disagreeing field takes the runner-up crop's color). One `fields`
+switch: on, the raster is clipped to the fields and the outlines draw; off,
+the raw CDL, under the painted fields too. Click = the field's story and a
+gold outline (picked geometrically in the browser); analyze = the per-crop
+table; year 2017-2025; Photon search. No SQL: the joins are positional (index
+arithmetic on known grids, `np.bincount` as the group-by). Runs from this
+repo's venv.
 
 Data:
 
 - CDL: <https://source.coop/chill/usda-cropland-data-layer>
 - Fields of the World: <https://source.coop/ftw/global-data>
 - AlphaEarth Foundations mosaic: <https://source.coop/tge-labs/aef-mosaic>
+
+Credit: the CDL-as-tiles approach (a kernel answering deck's z/x/y with PNGs
+cut from the Cropland Data Layer) follows [fused.io](https://www.fused.io/)
+and their CDL tile UDF,
+<https://github.com/fusedio/udfs/tree/main/public/CDLs_Tile_Example>.
 
 Run:
 
@@ -68,7 +77,8 @@ uv sync
 uv run marimo edit cdl-ftw.py            # or: uv run marimo edit cdl-ftw.py --sandbox
 ```
 
-`tools/patch_lonboard_raster_unlit.py` makes three edits to lonboard 0.16's
+`tools/patch_lonboard_raster_unlit.py` (used by `cdl-ftw.py`, `aef-similarity.py`
+and `aef-agreement.py`, not by `cdl-aef-deck.py`) makes three edits to lonboard 0.16's
 shipped JS: turns off deck's default lighting on the raster tile mesh (every
 tile otherwise draws ~0.69x darker; no Python prop reaches it), raises the 10 s
 tile request timeout to 120 s (a slow batch otherwise leaves tiles deck never

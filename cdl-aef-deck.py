@@ -9,10 +9,8 @@
 #     "numpy",
 #     "scipy",
 #     "anywidget>=0.9",
-#     "lonboard>=0.16.0,<0.17",
-#     "arro3-core",
+#     "pyarrow>=25.0.0",
 #     "pillow==12.3.0",
-#     "morecantile==7.0.3",
 #     "ipywidgets==8.1.8",
 #     "traitlets==5.15.1",
 # ]
@@ -22,7 +20,7 @@
 Zoomed out, at ANY zoom, the map is the Cropland Data Layer as a picture:
 tiles the kernel renders from the icechunk store's majority pyramid (30 m
 2008-2025, 10 m 2024-2025), the same read as cdl-ftw.py, with a crops-only
-mask and the P(field) clip as toggles. Zoomed in (camera z12.5+, a field
+mask and the P(field) clip as toggles. Zoomed in (camera z12+, a field
 paint on), the unit becomes THE FIELD:
 
   1. The fields in view are the connected components of FTW P(field) >= 0.5
@@ -47,18 +45,21 @@ paint on), the unit becomes THE FIELD:
      under the fields (a faded field fades to the basemap). A click outlines
      the field in gold; the same field again, or the basemap, clears it.
 
-The map is lonboard's RasterLayer with the batch serve and the JS patch of
-cdl-ftw.py / aef-agreement.py (Stephen, 2026-08-25: "lets go back to the
-lonboard and patch ... i think we got that smoother"; a custom deck.gl widget
-with two TileLayers was the first build, commits b970d50..0693f27). ONE
-raster layer, rebuilt as a NEW layer on every state change (year, paint,
-masks, selection, click); deck asks for z/x/y, the kernel serves the WHOLE
-VIEW per batch: the CDL raster below tile z13, the field paint from z13
-(the CDL is not drawn under the fields: a faded field fades to the basemap).
-The click is the HUD's canvas click through ctl (not lonboard's on_click),
-unprojected by the kernel. No SQL: the joins are positional (every dataset is
-a raster on a known grid; the field id image from ndimage.label is the key
-and np.bincount is the groupby), see the "join" cell.
+The map is a deck.gl 9.3.10 anywidget (the HRRR counties film's pinned
+esm.sh graph inside maplibre, docs/deck-geoarrow-fields-plan.md). Zoomed
+out, a TileLayer whose PNGs the kernel renders, ONE batch per view (cdl-ftw's
+serve over custom messages). From camera z12 with a field paint on, the
+FIELDS ARE POLYGONS: the FTW PMTiles' z13 tiles under the padded view,
+decoded to closed rings, each polygon keyed to its field id by sampling the
+label grid, shipped as one GeoArrow IPC table to a GeoArrowPolygonLayer; a
+paint switch is a bytes trait of colors, no reload; a pan inside the box
+costs nothing. The click is picked geometrically IN THE BROWSER (deck's GPU
+picking never worked under marimo) and the kernel tells the field's story.
+The lonboard RasterLayer build is in history (e82a293..3448d2b); the first
+deck-widget build with two TileLayers at b970d50..0693f27. No SQL: the joins
+are positional (every dataset is a raster on a known grid; the field id image
+from ndimage.label is the key and np.bincount is the groupby), see the
+"join" cell.
 
 Data (all anonymous on source.coop): the CDL icechunk repo
 (chill/usda-cropland-data-layer), FTW P(field) Zarr + per-state PMTiles
@@ -73,27 +74,6 @@ import marimo
 
 __generated_with = "0.24.0"
 app = marimo.App(width="full")
-
-
-@app.cell
-def _():
-    # ---- the lonboard JS patch, applied in the RUNNING environment (cdl-ftw.py's
-    # first cell: unlit raster mesh, 120 s tile timeout, per-instance deck ids;
-    # --sandbox builds a fresh env, and an unpatched lonboard cost a day). Idempotent.
-    import importlib.util as _ilu
-    import os as _os
-
-    _here = _os.path.dirname(_os.path.abspath(__file__)) if "__file__" in globals() else _os.getcwd()
-    _tool = _os.path.join(_here, "tools", "patch_lonboard_raster_unlit.py")
-    LONBOARD_PATCHED = False
-    if _os.path.exists(_tool):
-        _spec = _ilu.spec_from_file_location("patch_lonboard_raster_unlit", _tool)
-        _mod = _ilu.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        LONBOARD_PATCHED = _mod.main() == 0
-    else:
-        print(f"patch tool not found at {_tool}; lonboard runs unpatched")
-    return (LONBOARD_PATCHED,)
 
 
 @app.cell
@@ -124,21 +104,14 @@ def _():
     import zarr
     from obstore.store import S3Store
 
-    import morecantile
-    from lonboard import Map, RasterLayer
-    from lonboard.raster import EncodedImage
-    from lonboard.basemap import CartoStyle, MaplibreBasemap
+    import pyarrow as pa
+    import pyarrow.ipc as pa_ipc
 
     import marimo as mo
 
     return (
-        CartoStyle,
-        EncodedImage,
         Image,
         ImageDraw,
-        Map,
-        MaplibreBasemap,
-        RasterLayer,
         S3Store,
         ThreadPoolExecutor,
         anywidget,
@@ -149,11 +122,12 @@ def _():
         json,
         math,
         mo,
-        morecantile,
         ndimage,
         np,
         obstore,
         os,
+        pa,
+        pa_ipc,
         struct,
         tempfile,
         threading,
@@ -172,7 +146,7 @@ def _(mo):
 
     Zoomed out: the **Cropland Data Layer** as a picture, at any zoom (the
     store's majority pyramid), with *crops only* and the *fields* clip as
-    masks. Zoomed in past **z12.5** with a field paint on, each **Fields of the
+    masks. Zoomed in past **z12** with a field paint on, each **Fields of the
     World** field gets its CDL majority crop, last year's crop, and its mean
     **AlphaEarth** vector; per view every crop with enough fields gets a
     prototype, and a field's *agreement* is how much closer its vector sits to
@@ -197,7 +171,7 @@ def _(mo):
 
 
 @app.cell
-def _(os, tempfile):
+def _(math, os, tempfile):
     # ---- constants ----------------------------------------------------------
     SC_BUCKET = "us-west-2.opendata.source.coop"
     AEF_ZARR = "tge-labs/aef-mosaic/"
@@ -239,10 +213,25 @@ def _(os, tempfile):
     BATCH_S = 0.05            # how long the first request of a burst waits
     TILE_CACHE = 3000         # PNG tiles kept
     TILE_ZMIN, TILE_ZMAX = 3, 15
-    VIEW_ZMIN = 3.0           # camera: the clamp snaps the zoom back
-    AEF_ZMIN = 13             # tile zoom from which the FIELD paint is served (camera ~z12)
-    OUTLINE_ZMIN = 12         # outlines from this tile zoom up
-    MARGIN = 0.35             # view box slack beyond the viewport
+    AEF_ZMIN = 13             # the PMTiles zoom the field polygons are read at (their top)
+    MARGIN = 0.15             # raster batch: view box slack beyond the viewport
+    # THE TWO KNOBS FOR WHERE THE FIELDS SHOW (Stephen, 2026-08-25 night: "we
+    # need to be able to zoom out and look at it").
+    # FIELD_ZOOM feels REVERSED: it is the camera zoom the fields START at, so
+    # a SMALLER number shows the fields from FURTHER OUT (12 = from camera z12
+    # and every zoom closer in); a bigger number makes you zoom in more. The
+    # status line prints the TILE zoom, one more than the camera.
+    # FIELD_MAX_KM2 caps the box the kernel folds (view + 15 %); a view above
+    # it says "zoom in for the fields". Camera z13 on a 1400-px canvas is
+    # ~70 km2 padded, z12 ~290, z11.5 ~600, z11 ~1,200; the AEF read is
+    # ~0.6 MB per km2 cold, then the disk cache.
+    FIELD_ZOOM = 11.0
+    PAD = 1.15                # the field box beyond the camera footprint (pans inside it cost nothing)
+    FIELD_MAX_KM2 = 1500.0
+    FIELD_TILE_Z = int(round(FIELD_ZOOM)) + 1   # the tile zoom of camera FIELD_ZOOM (256-px tiles): the raster's clip
+    #                                             and outlines apply from here, nothing field-related below
+    SETTLE = 0.35             # seconds the camera must rest before a field serve
+    LABELS_SLOT = "watername_ocean"   # the Positron style layer the deck layers draw under
     MIN_FIELD_PX = 12         # ~0.3 ac at 10 m: smaller components sit out
     MIN_CROP_FRAC = 0.3       # a field is a CROP field if >= this much is a crop class
     MIN_CLASS_FIELDS = 20     # a crop needs this many fields in view for a prototype
@@ -266,7 +255,16 @@ def _(os, tempfile):
 
     VIEW_W, VIEW_H = 1400, 700
     EXTENT = [-125.0, 24.0, -66.5, 49.8]
-    HOME = {"longitude": -121.45, "latitude": 37.95, "zoom": 12.5}  # the Delta west of Stockton
+    # the opening view: Stephen's box over the Delta (Bethel Island to Stockton,
+    # 2026-08-25, boundingbox.klokantech.com), fitted to the canvas
+    HOME_BOX = (-121.604644, 37.887747, -121.2336, 38.111648)
+    _hw, _hs, _he, _hn = HOME_BOX
+    _my = lambda lat: math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+    _zx = math.log2(2 * math.pi * (VIEW_W / 512) / math.radians(_he - _hw))
+    _zy = math.log2(2 * math.pi * (VIEW_H / 512) / (_my(_hn) - _my(_hs)))
+    HOME = {"longitude": (_hw + _he) / 2,
+            "latitude": math.degrees(2 * math.atan(math.exp((_my(_hn) + _my(_hs)) / 2)) - math.pi / 2),
+            "zoom": round(min(_zx, _zy) - 0.05, 2)}
     CACHE_DIR = os.path.join(tempfile.gettempdir(), "x-sql-marimo")
 
     HOLD: dict = {}
@@ -293,6 +291,9 @@ def _(os, tempfile):
         CDL_YEARS,
         DIM_ALPHA,
         EXTENT,
+        FIELD_MAX_KM2,
+        FIELD_TILE_Z,
+        FIELD_ZOOM,
         FTW_LEVELS,
         FTW_RES,
         FTW_TILE_ZMAX,
@@ -302,19 +303,20 @@ def _(os, tempfile):
         FTW_ZARR,
         HOLD,
         HOME,
+        LABELS_SLOT,
         LEVELS,
         LEVELS10,
+        MARGIN,
         MIN_CLASS_FIELDS,
         MIN_CROP_FRAC,
-        MARGIN,
         MIN_FIELD_PX,
         OUTLINE,
-        OUTLINE_ZMIN,
-        PANEL_MIN_AC,
+        PAD,
         PX_PER,
         QUIET,
         RAMPS,
         SC_BUCKET,
+        SETTLE,
         TAU,
         TILE_CACHE,
         TILE_PX,
@@ -322,7 +324,6 @@ def _(os, tempfile):
         TILE_ZMIN,
         VIEW_H,
         VIEW_W,
-        VIEW_ZMIN,
         YEAR0,
         YEARS,
     )
@@ -414,7 +415,18 @@ def _(
 
 
 @app.cell
-def _(AGREE_CMAP, CLASSES, MARGIN, NONCROP_CODES, RAMPS, VIEW_H, VIEW_W, math, np):
+def _(
+    AGREE_CMAP,
+    CLASSES,
+    MARGIN,
+    NONCROP_CODES,
+    PAD,
+    RAMPS,
+    VIEW_H,
+    VIEW_W,
+    math,
+    np,
+):
     # ---- pure helpers -------------------------------------------------------
     def tile_box(z, x, y):
         """Web Mercator tile -> lon/lat (W, S, E, N)."""
@@ -425,23 +437,39 @@ def _(AGREE_CMAP, CLASSES, MARGIN, NONCROP_CODES, RAMPS, VIEW_H, VIEW_W, math, n
         S = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (y + 1) / n))))
         return W, S, E, N
 
-    def bbox4326(vs):
-        """The view box (W, S, E, N) from the camera, with MARGIN slack."""
-        span = 360.0 / (512 * 2 ** vs["zoom"])
-        dlon = VIEW_W * span * (1 + MARGIN) / 2
-        dlat = VIEW_H * span * math.cos(math.radians(vs["latitude"])) * (1 + MARGIN) / 2
-        return (vs["longitude"] - dlon, vs["latitude"] - dlat,
-                vs["longitude"] + dlon, vs["latitude"] + dlat)
+    def _lat_to_y(lat):
+        r = math.radians(lat)
+        return (1 - math.log(math.tan(r) + 1 / math.cos(r)) / math.pi) / 2
 
-    def unproject(vs, px, py, w, h):
-        """Canvas pixel -> lon/lat from the camera the kernel tracks."""
-        world = 512 * 2 ** vs["zoom"]
-        lon = vs["longitude"] + (px - w / 2) * 360.0 / world
-        lat0 = math.radians(vs["latitude"])
-        uy = (1 - math.log(math.tan(lat0) + 1 / math.cos(lat0)) / math.pi) / 2
-        uy = uy + (py - h / 2) / world
-        lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * uy))))
-        return lon, lat
+    def _y_to_lat(y):
+        return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y))))
+
+    def view_to_bbox(vs):
+        """The flat camera footprint (W, S, E, N); the widget reports its canvas
+        size (`w`, `h`) with every move, the constants are the seed."""
+        world = 512 * (2 ** vs["zoom"])
+        w, h = vs.get("w") or VIEW_W, vs.get("h") or VIEW_H
+        half_lon = 360.0 * w / world / 2
+        yc, half_y = _lat_to_y(vs["latitude"]), h / world / 2
+        return (vs["longitude"] - half_lon, _y_to_lat(yc + half_y),
+                vs["longitude"] + half_lon, _y_to_lat(yc - half_y))
+
+    def pad_box(b, f=PAD):
+        dx, dy = (b[2] - b[0]) * (f - 1) / 2, (b[3] - b[1]) * (f - 1) / 2
+        return (max(-179.9, b[0] - dx), max(-85.0, b[1] - dy),
+                min(179.9, b[2] + dx), min(85.0, b[3] + dy))
+
+    def bbox4326(vs):
+        """The raster batch's view box: the footprint with MARGIN slack."""
+        return pad_box(view_to_bbox(vs), 1 + MARGIN)
+
+    def box_km2(b):
+        w = (b[2] - b[0]) * 111.32 * math.cos(math.radians((b[1] + b[3]) / 2))
+        return abs(w * (b[3] - b[1]) * 110.574)
+
+    def contains(outer, inner):
+        return (outer[0] <= inner[0] and outer[1] <= inner[1]
+                and outer[2] >= inner[2] and outer[3] >= inner[3])
 
     def albers_xy(lon, lat):
         """EPSG:5070 forward (Albers equal-area conic on GRS80), closed form in
@@ -503,8 +531,11 @@ def _(AGREE_CMAP, CLASSES, MARGIN, NONCROP_CODES, RAMPS, VIEW_H, VIEW_W, math, n
         albers_box,
         albers_xy,
         bbox4326,
+        box_km2,
+        contains,
+        pad_box,
         tile_box,
-        unproject,
+        view_to_bbox,
     )
 
 
@@ -768,6 +799,129 @@ def _(
         rings = [r for v, _ in res for r in v]
         return rings, len(jobs), sum(1 for _, miss in res if miss)
 
+    # ---- the same tiles as POLYGONS: closed rings, holes attached to their
+    # exterior by MVT winding (exterior = positive shoelace area in tile coords,
+    # y down). tippecanoe clips at the tile edge (buffer 5/4096), so a field
+    # across two tiles is two pieces; fills and the pick go by the sampled
+    # field id, so the pieces do not matter to them (the tile-edge route for
+    # whole fields is open: docs/deck-geoarrow-fields-plan.md).
+    _pmem, _pmem_lock = {}, threading.Lock()
+
+    def _clip_ring(a, extent):
+        """Sutherland-Hodgman of a closed ring against [0, extent]^2 (tile
+        coords): tippecanoe's buffer (~2 % of the tile) put the same piece in
+        two tiles, and two fills at alpha 220 read as a dark band. None if
+        nothing is left."""
+        for axis, bound, keep_ge in ((0, 0.0, True), (0, float(extent), False), (1, 0.0, True), (1, float(extent), False)):
+            if len(a) < 4:
+                return None
+            p, q = a[:-1], a[1:]
+            vp, vq = p[:, axis], q[:, axis]
+            ip = (vp >= bound) if keep_ge else (vp <= bound)
+            iq = (vq >= bound) if keep_ge else (vq <= bound)
+            if ip.all() and iq.all():
+                continue
+            cross = ip != iq
+            dv = vq - vp
+            t = np.where(cross, (bound - vp) / np.where(dv == 0, 1.0, dv), 0.0)
+            X = p + t[:, None] * (q - p)
+            X[:, axis] = bound
+            cnt = ip.astype(np.int64) + cross
+            off = np.cumsum(cnt) - cnt
+            out = np.empty((int(cnt.sum()), 2), dtype=np.float64)
+            out[off[ip]] = p[ip]
+            out[off[cross] + ip[cross]] = X[cross]
+            if len(out) < 3:
+                return None
+            a = np.vstack([out, out[:1]])
+        return a if len(a) >= 4 else None
+
+    def _decode_polys(blob, year, z, x, y):
+        if blob[:2] == b"\x1f\x8b":
+            blob = gzip.decompress(blob)
+        want = str(year)
+        out = []
+        n = 1 << z
+        for f, _w, v in _fields_pb(blob):
+            if f != 3:
+                continue
+            name, extent, feats = None, 4096, []
+            for lf, _lw, lv in _fields_pb(v):
+                if lf == 1:
+                    name = lv.decode("utf-8")
+                elif lf == 2:
+                    feats.append(lv)
+                elif lf == 5:
+                    extent = lv
+            if name != want:
+                continue
+            for fv in feats:
+                gtype, geom = 0, b""
+                for ff, _fw, fvv in _fields_pb(fv):
+                    if ff == 3:
+                        gtype = fvv
+                    elif ff == 4:
+                        geom = fvv
+                if gtype != 3:
+                    continue
+                poly = None
+                for ring in _rings(geom):
+                    if len(ring) < 4:
+                        continue
+                    a = np.asarray(ring, dtype=np.float64)
+                    if a[0, 0] != a[-1, 0] or a[0, 1] != a[-1, 1]:
+                        a = np.vstack([a, a[:1]])
+                    area = 0.5 * float(np.sum(a[:-1, 0] * a[1:, 1] - a[1:, 0] * a[:-1, 1]))
+                    if area == 0.0:
+                        continue
+                    a = _clip_ring(a, extent)
+                    if a is None:
+                        if area > 0:
+                            poly = None   # an exterior wholly in the buffer: its holes go too
+                        continue
+                    lon = (x + a[:, 0] / extent) / n * 360.0 - 180.0
+                    lat = np.degrees(np.arctan(np.sinh(np.pi * (1.0 - 2.0 * (y + a[:, 1] / extent) / n))))
+                    ll = np.column_stack([lon, lat])
+                    if area > 0 or poly is None:
+                        poly = [ll]
+                        out.append(poly)
+                    else:
+                        poly.append(ll)
+        return out
+
+    def _tile_polys(st, z, x, y, year):
+        key = (st, z, x, y, year)
+        with _pmem_lock:
+            v = _pmem.get(key)
+        if v is not None:
+            return v
+        b = _blob(st, z, x, y)
+        v = _decode_polys(b, year, z, x, y) if b else []
+        with _pmem_lock:
+            _pmem[key] = v
+            if len(_pmem) > 2000:
+                for _k in list(_pmem)[:300]:
+                    _pmem.pop(_k, None)
+        return v
+
+    def ftw_tile_polys(states, year, W, S, E, N, z=FTW_TILE_ZMAX):
+        """Every field polygon (list of closed lon/lat rings, exterior first)
+        of the states' PMTiles tiles at zoom z under the box."""
+        z = min(z, FTW_TILE_ZMAX)
+        n = 1 << z
+
+        def tx(lon):
+            return min(n - 1, max(0, int((lon + 180) / 360 * n)))
+
+        def ty(lat):
+            lat = max(-85.05, min(85.05, lat))
+            return min(n - 1, max(0, int((1 - math.log(math.tan(math.radians(lat))
+                                                     + 1 / math.cos(math.radians(lat))) / math.pi) / 2 * n)))
+
+        jobs = [(st, z, x, y, year) for st in states
+                for x in range(tx(W), tx(E) + 1) for y in range(ty(N), ty(S) + 1)]
+        return [p for v in _tpool.map(lambda j: _tile_polys(*j), jobs) for p in v]
+
     # the FTW state partitions: each file's extent from its OWN row-group stats
     # (the STAC bboxes are wrong; US_CA reports Montana). Non-CONUS rows kept;
     # CDL has no pixels there.
@@ -808,7 +962,7 @@ def _(
     def states_in(W, S, E, N):
         return [s for s, w, s_, e, n in STATES if w < E and e > W and s_ < N and n > S]
 
-    return ftw_tile_rings, states_in
+    return ftw_tile_polys, ftw_tile_rings, states_in
 
 
 @app.cell
@@ -823,7 +977,7 @@ def _(
     FTW_RES,
     FTW_Y0,
     FTW_YEARS,
-    HOLD,
+    HOLD: dict,
     Image,
     ImageDraw,
     LEVELS,
@@ -832,6 +986,7 @@ def _(
     OUTLINE,
     PX_PER,
     TILE_PX,
+    ThreadPoolExecutor,
     albers_box,
     albers_xy,
     io,
@@ -854,6 +1009,7 @@ def _(
     _BUDGET = 512 * 1024 * 1024
     _lock = threading.Lock()
     _meta = {}                         # (group, k) -> (x_left_edge, y_top_edge, pix, W, H)
+    _bpool = ThreadPoolExecutor(max_workers=8)   # a window's blocks are read in parallel
 
     def _grp(year):
         return ("10m", DS10, LEVELS10, 10.0) if year in FTW_YEARS else ("30m", DS, LEVELS, 30.0)
@@ -898,15 +1054,16 @@ def _(
         out = np.zeros((max(0, r1 - r0), max(0, c1 - c0)), dtype=np.uint8)
         if out.size == 0:
             return out, c0, r0
-        for by in range(r0 // _BLK, (r1 - 1) // _BLK + 1):
-            for bx in range(c0 // _BLK, (c1 - 1) // _BLK + 1):
-                a = _block(g, ds, k, year, by, bx)
-                sr, sc = by * _BLK, bx * _BLK
-                rr0, cc0 = max(r0, sr), max(c0, sc)
-                rr1, cc1 = min(r1, sr + a.shape[0]), min(c1, sc + a.shape[1])
-                if rr1 <= rr0 or cc1 <= cc0:
-                    continue
-                out[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0] = a[rr0 - sr:rr1 - sr, cc0 - sc:cc1 - sc]
+        want = [(by, bx) for by in range(r0 // _BLK, (r1 - 1) // _BLK + 1)
+                for bx in range(c0 // _BLK, (c1 - 1) // _BLK + 1)]
+        got = list(_bpool.map(lambda b: _block(g, ds, k, year, *b), want))
+        for (by, bx), a in zip(want, got):
+            sr, sc = by * _BLK, bx * _BLK
+            rr0, cc0 = max(r0, sr), max(c0, sc)
+            rr1, cc1 = min(r1, sr + a.shape[0]), min(c1, sc + a.shape[1])
+            if rr1 <= rr0 or cc1 <= cc0:
+                continue
+            out[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0] = a[rr0 - sr:rr1 - sr, cc0 - sc:cc1 - sc]
         return out, c0, r0
 
     def level_for(year, z, lat):
@@ -1100,7 +1257,7 @@ def _(
     FTW_ROOT,
     FTW_Y0,
     FTW_YEARS,
-    HOLD,
+    HOLD: dict,
     MIN_CLASS_FIELDS,
     MIN_CROP_FRAC,
     MIN_FIELD_PX,
@@ -1389,23 +1546,19 @@ def _(
     CLASSES,
     CLASS_RGB,
     DIM_ALPHA,
-    EXTENT,
     FTW_RES,
     FTW_Y0,
-    Image,
-    ImageDraw,
-    OUTLINE,
     QUIET,
     RAMP_HEX,
-    TILE_PX,
-    blank_png,
     cname,
     io,
-    ndimage,
+    math,
     np,
-    tile_box,
+    pa,
+    pa_ipc,
 ):
-    # ---- the field paints: one rgba LUT by field id, and the tiles drawn from it
+    # ---- the field paints: one rgba LUT by field id; the polygons keyed to
+    # the field ids and shipped as Arrow
     def field_fill(ft, paint, sel, inv=False):
         """(nlab+1, 4) uint8 rgba by field id for a paint (cdl, agreement,
         viridis, suggests). Fields that sit out (tiny, non-crop, no embedding)
@@ -1474,64 +1627,99 @@ def _(
                           "note": "" if len(a) else "(unscored)"})
         return items
 
-    GOLD = (255, 200, 40, 255)
-    HIT_PAD, HIT_W = 6, 3   # lattice pad (px) so the outline erosion sees past the seam; outline width
+    def poly_fids(ft, polys):
+        """The field id of every polygon: the label grid sampled at the
+        exterior ring's centroid; if that lands on 0 (a thin field, a hole),
+        the mode of the labels at the vertices nudged ~15 m toward it."""
+        n = len(polys)
+        fids = np.zeros(n, dtype=np.int32)
+        if n == 0:
+            return fids
+        lab, fx0, fy0 = ft["lab"], ft["fx0"], ft["fy0"]
+        H, W = lab.shape
 
-    def field_tile_png(ft, rgba, rings, z, x, y, hit=None):
-        """PNG for tile (z, x, y) from the field-id image and the paint LUT;
-        outline polylines drawn on top with PIL; the picked field (`hit`) gets
-        a gold outline, its fill unchanged."""
-        W, S, E, N = tile_box(z, x, y)
-        bW, bS, bE, bN = ft["box"]
-        if E < bW or W > bE or N < bS or S > bN or E < EXTENT[0] or W > EXTENT[2]:
-            return blank_png()
-        T, P = TILE_PX, HIT_PAD
-        lons = W + (np.arange(-P, T + P) + 0.5) * (E - W) / T
-        lats = N - (np.arange(-P, T + P) + 0.5) * (N - S) / T
-        jx = np.floor((lons + 180.0) / FTW_RES).astype(np.int64) - ft["fx0"]
-        jy = np.floor((FTW_Y0 - lats) / FTW_RES).astype(np.int64) - ft["fy0"]
-        lab = ft["lab"]
-        okx = (jx >= 0) & (jx < lab.shape[1])
-        oky = (jy >= 0) & (jy < lab.shape[0])
-        ids = np.zeros((T + 2 * P, T + 2 * P), dtype=np.int32)
-        if okx.any() and oky.any():
-            ids[np.ix_(oky, okx)] = lab[np.ix_(jy[oky], jx[okx])]
-        out = rgba[ids]
-        if hit is not None and hit > 0:
-            hm = ids == hit
-            if hm.any():
-                edge = hm & ~ndimage.binary_erosion(hm, iterations=HIT_W, border_value=1)
-                out[edge] = GOLD
-        out = out[P:P + T, P:P + T]
-        img = Image.fromarray(np.ascontiguousarray(out), "RGBA")
-        if rings:
-            rb = rings["bounds"]
-            hit = np.flatnonzero((rb[:, 0] < E) & (rb[:, 2] > W) & (rb[:, 1] < N) & (rb[:, 3] > S))
-            if len(hit):
-                d = ImageDraw.Draw(img)
-                sx, sy = T / (E - W), T / (N - S)
-                for hi in hit:
-                    r = rings["rings"][hi]
-                    pts = list(zip((r[:, 0] - W) * sx, (N - r[:, 1]) * sy))
-                    if len(pts) >= 2:
-                        d.line(pts, fill=OUTLINE, width=1)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG", optimize=False, compress_level=4)
-        return buf.getvalue()
+        def at(lon, lat):
+            gx = np.floor((lon + 180.0) / FTW_RES).astype(np.int64) - fx0
+            gy = np.floor((FTW_Y0 - lat) / FTW_RES).astype(np.int64) - fy0
+            ok = (gx >= 0) & (gx < W) & (gy >= 0) & (gy < H)
+            out = np.zeros(len(lon), dtype=np.int32)
+            out[ok] = lab[gy[ok], gx[ok]]
+            return out
 
-    return field_fill, field_tile_png, legend_for
+        ext = [p[0][:-1] for p in polys]
+        cen = np.array([[r[:, 0].mean(), r[:, 1].mean()] for r in ext])
+        fids[:] = at(cen[:, 0], cen[:, 1])
+        step_lat = 15.0 / 110574.0
+        for i in np.flatnonzero(fids == 0):
+            r, c = ext[i], cen[i]
+            d = c - r
+            dist = np.hypot(d[:, 0] * math.cos(math.radians(c[1])), d[:, 1])
+            f = np.minimum(1.0, step_lat / np.maximum(dist, 1e-12))
+            pts = r + d * f[:, None]
+            v = at(pts[:, 0], pts[:, 1])
+            v = v[v > 0]
+            if len(v):
+                fids[i] = np.bincount(v).argmax()
+        return fids
+
+    def polys_ipc(polys, fids, rgba):
+        """One Arrow IPC stream: `geometry` (geoarrow.polygon, interleaved
+        f64), `fid` (int32) and `rgba` (uint8 x 4, the paint at build time)."""
+        ring_len, nrings, xs = [], [], []
+        for p in polys:
+            nrings.append(len(p))
+            for r in p:
+                ring_len.append(len(r))
+                xs.append(r)
+        xy = np.concatenate(xs) if xs else np.zeros((0, 2))
+        ring_off = np.concatenate([[0], np.cumsum(ring_len)]).astype(np.int32)
+        poly_off = np.concatenate([[0], np.cumsum(nrings)]).astype(np.int32)
+        coords = pa.FixedSizeListArray.from_arrays(pa.array(np.ascontiguousarray(xy, dtype=np.float64).ravel(), pa.float64()), 2)
+        rings = pa.ListArray.from_arrays(pa.array(ring_off, pa.int32()), coords)
+        geom = pa.ListArray.from_arrays(pa.array(poly_off, pa.int32()), rings)
+        col = np.ascontiguousarray(rgba[fids], dtype=np.uint8)
+        colors = pa.FixedSizeListArray.from_arrays(pa.array(col.ravel(), pa.uint8()), 4)
+        schema = pa.schema([
+            pa.field("geometry", geom.type, False, metadata={"ARROW:extension:name": "geoarrow.polygon"}),
+            pa.field("fid", pa.int32(), False),
+            pa.field("rgba", colors.type, False),
+        ])
+        tbl = pa.Table.from_arrays([geom, pa.array(fids, pa.int32()), colors], schema=schema)
+        sink = io.BytesIO()
+        with pa_ipc.new_stream(sink, tbl.schema) as w:
+            w.write_table(tbl)
+        return sink.getvalue()
+
+    def lines_ipc(rings):
+        """One Arrow IPC stream of the outline polylines: `path`
+        (list<fixed_size_list<f64, 2>>)."""
+        lens = [len(r) for r in rings]
+        xy = np.concatenate(rings) if rings else np.zeros((0, 2))
+        off = np.concatenate([[0], np.cumsum(lens)]).astype(np.int32)
+        coords = pa.FixedSizeListArray.from_arrays(pa.array(np.ascontiguousarray(xy, dtype=np.float64).ravel(), pa.float64()), 2)
+        path = pa.ListArray.from_arrays(pa.array(off, pa.int32()), coords)
+        tbl = pa.Table.from_arrays([path], schema=pa.schema([pa.field("path", path.type, False)]))
+        sink = io.BytesIO()
+        with pa_ipc.new_stream(sink, tbl.schema) as w:
+            w.write_table(tbl)
+        return sink.getvalue()
+
+    return field_fill, legend_for, lines_ipc, poly_fids, polys_ipc
 
 
 @app.cell
 def _(anywidget, traitlets):
     class HudControls(anywidget.AnyWidget):
-        """The strip under the map (aef-agreement.py's skeleton: the canvas CLICK
-        through ctl, the fullscreen dock, the bbox-button hider) with this
-        notebook's controls: year, the raster switches (CDL raster, crops only,
-        fields clip), the field paint (CDL / color by agreement / AlphaEarth
-        suggests, one at a time or none), highlight disagreement, outlines,
+        """The strip under the map (aef-agreement.py's skeleton: the fullscreen
+        dock; the click is the map widget's own now) with this
+        notebook's controls: year, the raster switches (CDL raster, crops only),
+        the one FIELDS switch (Stephen, 2026-08-25: "just keep one button for
+        field boundaries ... have it selected ... it clips to the fields, but
+        it can be unselected": on = clip + outlines, off = the raw CDL, also
+        under the painted fields), the field paint (CDL / color by agreement /
+        AlphaEarth suggests, one at a time or none), highlight disagreement,
         analyze, refresh, search, the pickable legend; panel and status lines.
-        Every commit re-runs the wiring cell (marimo), where everything happens
+        Every commit re-runs the wiring cell (marimo), where the acts happen
         IN the cell run."""
 
         ctl = traitlets.Unicode("").tag(sync=True)
@@ -1564,14 +1752,13 @@ def _(anywidget, traitlets):
           let paint = has("paint") ? last.paint : "viridis";
           let raster = has("raster") ? !!last.raster : true;
           let crops = has("crops") ? !!last.crops : false;
-          let clip = has("clip") ? !!last.clip : false;
-          let outlines = has("outlines") ? !!last.outlines : true;
+          let fieldsOn = has("fields") ? !!last.fields : true;
           const sel = new Set(Array.isArray(last.sel) ? last.sel : []);
           let seq = has("n") ? (last.n | 0) : 0;
           const send = (act, extra) => {
             model.set("ctl", JSON.stringify(Object.assign({
               act: act, paint: paint, sel: Array.from(sel), inv: inv.checked,
-              raster: raster, crops: crops, clip: clip, outlines: outlines,
+              raster: raster, crops: crops, fields: fieldsOn,
               year: parseInt(yearSel.value, 10), n: ++seq }, extra || {})));
             model.save_changes();
           };
@@ -1600,8 +1787,8 @@ def _(anywidget, traitlets):
           rasterBox.style.cssText = "display:inline-flex;gap:.6rem;align-items:center";
           const [rasLab] = mkChk("CDL raster", "the Cropland Data Layer as tiles, at any zoom (not under the fields)", raster, (v) => { raster = v; send("set"); });
           const [cropLab] = mkChk("crops only", "raster: drop the non-crop classes", crops, (v) => { crops = v; send("set"); });
-          const [clipLab] = mkChk("fields clip", "raster: only pixels inside a P(field) >= 0.5 cell (the FTW pyramid, at every zoom)", clip, (v) => { clip = v; send("set"); });
-          rasterBox.append(rasLab, cropLab, clipLab);
+          const [fldLab] = mkChk("fields", "the Fields of the World: the raster clipped to P(field) >= 0.5 and the field outlines drawn; off = the raw CDL everywhere, and under the painted fields", fieldsOn, (v) => { fieldsOn = v; send("set"); });
+          rasterBox.append(rasLab, cropLab, fldLab);
           const paintBox = document.createElement("span");
           paintBox.style.cssText = "display:inline-flex;gap:.3rem;align-items:center";
           const pl = document.createElement("span");
@@ -1613,18 +1800,17 @@ def _(anywidget, traitlets):
             return [key, b];
           };
           const paintBtns = [
-            mkPaint("cdl", "CDL", "each field its CDL majority crop's color (from camera ~z12); click again to hide"),
+            mkPaint("cdl", "CDL", "each field its CDL majority crop's color (from camera z12); click again to hide"),
             // "agreement" (CDL color, alpha by agreement) is OUT for now (Stephen,
             // 2026-08-25: near-binary scores made it read as plain CDL):
             // mkPaint("agreement", "agreement", "the CDL color, alpha follows how well AlphaEarth backs the crop; click again to hide"),
-            mkPaint("viridis", "color by agreement", "viridis on the agreement value: bright = agrees, dark = a lead (from camera ~z12); highlight disagreement reverses; click again to hide"),
-            mkPaint("suggests", "AlphaEarth suggests", "a disagreeing field takes the color of the crop AlphaEarth puts it closest to, relative to this view; agreeing fields go quiet (from camera ~z12); click again to hide"),
+            mkPaint("viridis", "color by agreement", "viridis on the agreement value: bright = agrees, dark = a lead (from camera z12); highlight disagreement reverses; click again to hide"),
+            mkPaint("suggests", "AlphaEarth suggests", "a disagreeing field takes the color of the crop AlphaEarth puts it closest to, relative to this view; agreeing fields go quiet (from camera z12); click again to hide"),
           ];
           const [invLab, inv] = mkChk("highlight disagreement", "color by agreement: reverse the ramp (bright = disagrees)", has("inv") ? !!last.inv : false, () => send("set"));
-          const [outLab] = mkChk("outlines", "field outlines from the FTW PMTiles, drawn on the tiles from z12", outlines, (v) => { outlines = v; send("set"); });
           const stylePaint = () => { paintBtns.forEach(([k, b]) => onCss(b, k === paint)); };
           stylePaint();
-          paintBox.append(pl, ...paintBtns.map(([, b]) => b), invLab, outLab);
+          paintBox.append(pl, ...paintBtns.map(([, b]) => b), invLab);
           const legendBox = document.createElement("div");
           legendBox.style.cssText =
             "display:flex;flex-wrap:wrap;align-items:center;" +
@@ -1750,46 +1936,14 @@ def _(anywidget, traitlets):
             }
           };
           document.addEventListener("fullscreenchange", onFs);
-          // the CLICK: a plain click on the map CANVAS (composedPath through the
-          // shadow roots, a drag guard); pixel + canvas rect go to the kernel,
-          // which unprojects with the view state it tracks (aef-similarity.py's)
-          let downAt = null;
-          const onDown = (e) => { downAt = [e.clientX, e.clientY]; };
-          const onClick = (e) => {
-            if (wrap.dataset.dead || !el.isConnected) return;
-            const path = e.composedPath ? e.composedPath() : [e.target];
-            const cv = path.find((n) => n && n.tagName === "CANVAS");
-            if (!cv) return;
-            if (downAt && Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
-            const r = cv.getBoundingClientRect();
-            if (!r.width || !r.height) return;
-            send("click", { px: e.clientX - r.left, py: e.clientY - r.top, w: r.width, h: r.height });
-          };
-          document.addEventListener("pointerdown", onDown, true);
-          document.addEventListener("click", onClick, true);
           const paintS = () => { status.textContent = model.get("status") || ""; };
           model.on("change:status", paintS);
           paintS();
           const paintP = () => { panel.innerHTML = model.get("panel") || ""; };
           model.on("change:panel", paintP);
           paintP();
-          const hideBbox = (root) => {
-            if (!root || !root.querySelectorAll) return;
-            root.querySelectorAll("button[aria-label]").forEach((b) => {
-              const a = b.getAttribute("aria-label");
-              if (a === "Select BBox" || a === "Cancel drawing" || a === "Clear bounding box") {
-                const holder = b.closest("div[style*='absolute']") || b;
-                holder.style.display = "none";
-              }
-            });
-            root.querySelectorAll("*").forEach((n) => { if (n.shadowRoot) hideBbox(n.shadowRoot); });
-          };
-          const bboxTimer = setInterval(() => hideBbox(document), 1000);
           return () => {
             document.removeEventListener("fullscreenchange", onFs);
-            document.removeEventListener("pointerdown", onDown, true);
-            document.removeEventListener("click", onClick, true);
-            clearInterval(bboxTimer);
             wrap.remove();
           };
         }
@@ -1800,17 +1954,371 @@ def _(anywidget, traitlets):
 
 
 @app.cell
-def _(CartoStyle, HOLD: dict, HOME, LONBOARD_PATCHED, Map, MaplibreBasemap):
-    # ---- map cell: builds the Map ONCE, must never re-run ------------------
-    _ = LONBOARD_PATCHED
-    HOLD["layer_state"] = None
-    deck = Map(
-        layers=[],
-        basemap=MaplibreBasemap(style=CartoStyle.Positron),
-        view_state=HOME,
-        height=700,
-        show_side_panel=False,
-    )
+def _(anywidget, asyncio, traitlets):
+    class DeckMap(anywidget.AnyWidget):
+        """The map: maplibre (Carto Positron, interleaved) with deck.gl 9.3.10
+        from esm.sh drawing INSIDE it under the label layers (the HRRR counties
+        film's pinned esm.sh graph; the 0693f27 build's boot). Layers:
+
+        - `cdl-<rgen>`: a TileLayer whose PNGs the kernel renders on request
+          (anywidget custom messages, one batch per view on the kernel side);
+          a new generation id makes deck refetch. Hidden while the fields draw.
+        - `fields`: a GeoArrowPolygonLayer over ONE Arrow IPC table in the
+          `fields` bytes trait (geoarrow.polygon, interleaved f64, plus `fid`
+          int32 and `rgba` uint8x4); `colors` (bytes, N x 4) repaints it
+          without a geometry reload; `lines` (an IPC table of paths) are the
+          outline polylines, a PathLayer; the picked field's pieces get a gold
+          PathLayer.
+        - the click is picked HERE, geometrically (pointerup, a press that
+          moves > 4 px or starts on a map control is not a click; bbox reject
+          then even-odd over the rings the browser holds), because deck's
+          GPU picking has never worked under marimo on any chassis tried.
+
+        Kernel -> browser: `config` (JSON), the three bytes traits, custom
+        messages `tile` and `fly`. Browser -> kernel: `view` (lon/lat/zoom +
+        canvas w/h on every moveend) and `pick` ({i, fid, on, lon, lat, gen})."""
+
+        config = traitlets.Unicode("{}").tag(sync=True)
+        view = traitlets.Unicode("").tag(sync=True)
+        pick = traitlets.Unicode("").tag(sync=True)
+        fields = traitlets.Bytes(b"").tag(sync=True)
+        colors = traitlets.Bytes(b"").tag(sync=True)
+        lines = traitlets.Bytes(b"").tag(sync=True)
+
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.tile_fn = None  # async (z, x, y) -> PNG bytes | None; the wiring sets it
+            self.on_msg(self._on_custom)
+
+        def _on_custom(self, widget, content, buffers):
+            if not isinstance(content, dict) or content.get("kind") != "tile":
+                return
+            try:
+                asyncio.get_running_loop().create_task(self._tile(content))
+            except RuntimeError:
+                self.send({"kind": "tile", "id": content.get("id"), "empty": True})
+
+        async def _tile(self, c):
+            try:
+                png = await self.tile_fn(int(c["z"]), int(c["x"]), int(c["y"])) if self.tile_fn else None
+            except Exception:
+                png = None
+            if png is None:
+                self.send({"kind": "tile", "id": c["id"], "empty": True})
+            else:
+                self.send({"kind": "tile", "id": c["id"]}, buffers=[png])
+
+        _esm = r"""
+        // every deck import pins the same versions AND the same ?deps= per package
+        // (esm.sh hashes a module by its deps list), so the whole graph resolves to
+        // ONE @deck.gl/core (the HRRR counties film's strings).
+        import maplibregl from "https://esm.sh/maplibre-gl@5.24.0";
+        import {MapboxOverlay} from "https://esm.sh/@deck.gl/mapbox@9.3.10?deps=@deck.gl/core@9.3.10,apache-arrow@18.1.0";
+        import {BitmapLayer, PathLayer} from "https://esm.sh/@deck.gl/layers@9.3.10?deps=@deck.gl/core@9.3.10,apache-arrow@18.1.0";
+        import {TileLayer} from "https://esm.sh/@deck.gl/geo-layers@9.3.10?deps=@deck.gl/core@9.3.10,@deck.gl/extensions@9.3.10,@deck.gl/layers@9.3.10,@deck.gl/mesh-layers@9.3.10,apache-arrow@18.1.0";
+        import {GeoArrowPolygonLayer} from "https://esm.sh/@geoarrow/deck.gl-layers@0.3.2?deps=@deck.gl/aggregation-layers@9.3.10,@deck.gl/core@9.3.10,@deck.gl/extensions@9.3.10,@deck.gl/geo-layers@9.3.10,@deck.gl/layers@9.3.10,@deck.gl/mesh-layers@9.3.10,apache-arrow@18.1.0";
+        import * as arrow from "https://esm.sh/apache-arrow@18.1.0";
+
+        const STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
+        const OUTLINE = [40, 40, 40, 200];
+        const GOLD = [255, 200, 40, 255];
+
+        function bytesOf(v) {
+          if (!v) return null;
+          if (v instanceof DataView) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+          if (v instanceof ArrayBuffer) return new Uint8Array(v);
+          if (v.buffer) return new Uint8Array(v.buffer, v.byteOffset || 0, v.byteLength);
+          return null;
+        }
+
+        function render({model, el}) {
+          let cfg = {};
+          try { cfg = JSON.parse(model.get("config") || "{}"); } catch (e) { cfg = {}; }
+          const css = document.createElement("link");
+          css.rel = "stylesheet"; css.href = "https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css";
+          const root = document.createElement("div");
+          root.style.cssText = "position:relative;width:100%";
+          const mapEl = document.createElement("div");
+          mapEl.style.cssText = "width:100%;height:" + (cfg.height || 700) + "px;background:#f4f2ee";
+          const note = document.createElement("div");
+          note.style.cssText = "position:absolute;left:8px;top:8px;z-index:5;font:11px ui-monospace,Menlo,monospace;" +
+            "color:#333;background:rgba(255,255,255,.85);padding:2px 6px;border-radius:3px;pointer-events:none;display:none";
+          root.append(mapEl, note);
+          el.append(css, root);
+          const say = (t) => { note.textContent = t; note.style.display = t ? "block" : "none"; };
+
+          let seq = 0, map = null, overlay = null;
+
+          // ---- tiles: ask the kernel, get a PNG back on the custom-message channel
+          const pending = new Map();
+          let tseq = 0;
+          model.on("msg:custom", (msg, buffers) => {
+            if (msg && msg.kind === "fly" && map) {
+              map.flyTo({center: [msg.lon, msg.lat], zoom: msg.zoom, duration: msg.duration || 2000});
+              return;
+            }
+            if (!msg || msg.kind !== "tile") return;
+            const p = pending.get(msg.id);
+            if (!p) return;
+            pending.delete(msg.id);
+            if (msg.empty || !buffers || !buffers.length) { p.resolve(null); return; }
+            const u8 = bytesOf(buffers[0]);
+            createImageBitmap(new Blob([u8], {type: "image/png"})).then(p.resolve, () => p.resolve(null));
+          });
+          const tileFn = ({index, signal}) => new Promise((resolve) => {
+            const id = ++tseq;
+            pending.set(id, {resolve});
+            model.send({kind: "tile", id, x: index.x, y: index.y, z: index.z});
+            if (signal) signal.addEventListener("abort", () => { pending.delete(id); resolve(null); });
+          });
+          const sub = (p) => {
+            if (!p.data) return null;
+            const {west, south, east, north} = p.tile.bbox;
+            return new BitmapLayer(p, {data: null, image: p.data, bounds: [west, south, east, north]});
+          };
+
+          // ---- the fields: one Arrow table, indexed for the geometric pick
+          let table = null, N = 0, fids = null, geo = null, colors = null, lines = [], hit = 0;
+          function indexGeometry() {
+            const d = table.getChild("geometry").data[0];       // polygon: list<ring>
+            const ringD = d.children[0];                        // ring: list<coord>
+            const coordD = ringD.children[0];                   // coord: fixed_size_list<f64, 2>
+            const xy = coordD.children[0].values;               // interleaved x y
+            const polyOff = d.valueOffsets, ringOff = ringD.valueOffsets;
+            const bbox = new Float64Array(N * 4), polys = new Array(N);
+            for (let i = 0; i < N; i++) {
+              let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+              const rings = [];
+              for (let r = polyOff[d.offset + i]; r < polyOff[d.offset + i + 1]; r++) {
+                const s = ringOff[r], e = ringOff[r + 1];
+                rings.push([s, e]);
+                for (let c = s; c < e; c++) { const x = xy[2 * c], y = xy[2 * c + 1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+              }
+              bbox[4 * i] = x0; bbox[4 * i + 1] = y0; bbox[4 * i + 2] = x1; bbox[4 * i + 3] = y1;
+              polys[i] = rings;
+            }
+            geo = {xy, bbox, polys};
+          }
+          function fieldAt(lng, lat) {
+            if (!geo) return -1;
+            const {xy, bbox, polys} = geo;
+            for (let i = 0; i < N; i++) {
+              if (lng < bbox[4 * i] || lng > bbox[4 * i + 2] || lat < bbox[4 * i + 1] || lat > bbox[4 * i + 3]) continue;
+              let inside = false;
+              for (const [s, e] of polys[i]) {
+                for (let a = s, b = e - 1; a < e; b = a++) {
+                  const xa = xy[2 * a], ya = xy[2 * a + 1], xb = xy[2 * b], yb = xy[2 * b + 1];
+                  if ((ya > lat) !== (yb > lat) && lng < (xb - xa) * (lat - ya) / (yb - ya) + xa) inside = !inside;
+                }
+              }
+              if (inside) return i;
+            }
+            return -1;
+          }
+          function loadFields() {
+            const u8 = bytesOf(model.get("fields"));
+            table = null; N = 0; fids = null; geo = null; hit = 0;
+            if (!u8 || !u8.length) return;
+            try {
+              table = arrow.tableFromIPC(u8);
+              N = table.numRows;
+              fids = table.getChild("fid").toArray();
+              indexGeometry();
+            } catch (e) { table = null; N = 0; geo = null; say("fields: " + e.message); }
+          }
+          function loadColors() {
+            const u8 = bytesOf(model.get("colors"));
+            colors = (u8 && N && u8.length === N * 4) ? u8.slice() : null;
+          }
+          function loadLines() {
+            lines = [];
+            const u8 = bytesOf(model.get("lines"));
+            if (!u8 || !u8.length) return;
+            try {
+              const t = arrow.tableFromIPC(u8);
+              const d = t.getChild("path").data[0];
+              const off = d.valueOffsets, xy = d.children[0].children[0].values;
+              for (let i = 0; i < t.numRows; i++) lines.push(xy.subarray(2 * off[d.offset + i], 2 * off[d.offset + i + 1]));
+            } catch (e) { lines = []; say("lines: " + e.message); }
+          }
+          function colorVector() {
+            if (!colors) return table.getChild("rgba");
+            const child = arrow.makeData({type: new arrow.Uint8(), data: colors});
+            const data = arrow.makeData({type: new arrow.FixedSizeList(4, new arrow.Field("c", new arrow.Uint8(), false)), length: N, nullCount: 0, child});
+            return arrow.makeVector(data);
+          }
+          function hitPaths() {
+            const out = [];
+            if (!geo || !fids || !(hit > 0)) return out;
+            for (let i = 0; i < N; i++) if (fids[i] === hit) for (const [s, e] of geo.polys[i]) out.push(geo.xy.subarray(2 * s, 2 * e));
+            return out;
+          }
+
+          const before = () => cfg.labels_slot || "watername_ocean";
+          function layers() {
+            const out = [];
+            const fieldsOn = !!(cfg.fields_on && table && N);
+            out.push(new TileLayer({
+              id: "cdl-" + (cfg.rgen || 0),
+              getTileData: tileFn,
+              tileSize: cfg.tile || 256,
+              minZoom: cfg.tile_zmin || 3, maxZoom: cfg.tile_zmax || 15,
+              extent: cfg.extent || null,
+              // off while the fields draw (a faded field must fade to the basemap),
+              // unless the FIELDS switch is off: then the raw CDL shows under the
+              // painted polygons (where FTW and the CDL disagree)
+              visible: cfg.raster !== false && (!fieldsOn || !!cfg.under),
+              refinementStrategy: "no-overlap",
+              beforeId: before(),
+              renderSubLayers: sub,
+            }));
+            if (fieldsOn) {
+              out.push(new GeoArrowPolygonLayer({
+                id: "fields",
+                data: table,
+                getPolygon: table.getChild("geometry"),
+                getFillColor: colorVector(),
+                filled: true,
+                stroked: false,
+                pickable: false,
+                _validate: false,
+                beforeId: before(),
+              }));
+              if (cfg.outlines !== false && lines.length) out.push(new PathLayer({
+                id: "outlines",
+                data: lines,
+                getPath: (d) => d,
+                positionFormat: "XY",
+                getColor: OUTLINE,
+                getWidth: 1,
+                widthUnits: "pixels",
+                widthMinPixels: 1,
+                pickable: false,
+                beforeId: before(),
+              }));
+              const hp = hitPaths();
+              if (hp.length) out.push(new PathLayer({
+                id: "hit",
+                data: hp,
+                getPath: (d) => d,
+                positionFormat: "XY",
+                getColor: GOLD,
+                getWidth: 3,
+                widthUnits: "pixels",
+                widthMinPixels: 3,
+                pickable: false,
+                beforeId: before(),
+              }));
+            }
+            return out;
+          }
+          function update() { if (overlay) { try { overlay.setProps({layers: layers()}); } catch (e) { say("layers: " + e.message); } } }
+
+          function sendView() {
+            if (!map) return;
+            const c = map.getCenter();
+            model.set("view", JSON.stringify({
+              longitude: c.lng, latitude: c.lat, zoom: map.getZoom(),
+              w: mapEl.clientWidth, h: mapEl.clientHeight, n: ++seq,
+            }));
+            model.save_changes();
+          }
+          function sendPick(i, fid, ll) {
+            model.set("pick", JSON.stringify({i, fid, on: hit > 0, lon: ll.lng, lat: ll.lat, gen: cfg.fgen || 0, n: ++seq}));
+            model.save_changes();
+          }
+
+          function boot() {
+            const home = cfg.home || {longitude: -96, latitude: 38.5, zoom: 4};
+            map = new maplibregl.Map({
+              container: mapEl, style: STYLE,
+              center: [home.longitude, home.latitude], zoom: home.zoom,
+              attributionControl: {compact: true},
+            });
+            map.addControl(new maplibregl.NavigationControl({showCompass: false}), "top-right");
+            map.addControl(new maplibregl.FullscreenControl(), "top-right");
+            overlay = new MapboxOverlay({
+              interleaved: true,
+              layers: [],
+              onError: (e) => say("deck: " + (e && e.message ? e.message : e)),
+            });
+            map.addControl(overlay);
+            // the pick, explicit on pointerup (the film's): the press must not
+            // start on a map control and must not move more than 4 px
+            let down = null;
+            mapEl.addEventListener("pointerdown", (ev) => {
+              down = (ev.target.closest && ev.target.closest(".maplibregl-ctrl")) ? null : [ev.clientX, ev.clientY];
+            }, true);
+            mapEl.addEventListener("pointerup", (ev) => {
+              if (!down) return;
+              const moved = Math.hypot(ev.clientX - down[0], ev.clientY - down[1]); down = null;
+              if (moved > 4 || !map) return;
+              const r = mapEl.getBoundingClientRect();
+              let ll = null;
+              try { ll = map.unproject([ev.clientX - r.left, ev.clientY - r.top]); }
+              catch (e) { say("unproject: " + e.message); return; }
+              if (!cfg.fields_on || !geo) { sendPick(-1, 0, ll); return; }
+              const i = fieldAt(ll.lng, ll.lat);
+              const f = i >= 0 ? fids[i] : 0;
+              // the same field again, or the basemap, clears
+              hit = (f > 0 && f !== hit) ? f : 0;
+              update();
+              sendPick(i, f, ll);
+            }, true);
+            if (cfg.debug) window.__aef = {overlay, map, model, get cfg() { return cfg; }, get geo() { return geo; }, get n() { return N; }};
+            map.on("load", () => { update(); sendView(); });
+            map.on("moveend", sendView);
+            map.on("error", (e) => { if (e && e.error && e.error.message) say("map: " + e.error.message); });
+            new ResizeObserver(() => { try { map.resize(); } catch (e) {} }).observe(mapEl);
+            document.addEventListener("fullscreenchange", () => { setTimeout(() => { try { map.resize(); } catch (e) {} }, 50); });
+          }
+
+          model.on("change:config", () => {
+            const was = cfg;
+            try { cfg = JSON.parse(model.get("config") || "{}"); } catch (e) { cfg = {}; }
+            if (cfg.height && cfg.height !== was.height && !document.fullscreenElement) mapEl.style.height = cfg.height + "px";
+            update();
+          });
+          model.on("change:fields", () => { loadFields(); loadColors(); update(); });
+          model.on("change:colors", () => { loadColors(); update(); });
+          model.on("change:lines", () => { loadLines(); update(); });
+          loadFields(); loadColors(); loadLines();
+          try { boot(); }
+          catch (e) { say("boot: " + e.message); console.error(e); }
+          return () => { try { map && map.remove(); } catch (e) {} };
+        }
+        export default {render};
+        """
+
+    return (DeckMap,)
+
+
+@app.cell
+def _(
+    DeckMap,
+    EXTENT,
+    HOLD: dict,
+    HOME,
+    LABELS_SLOT,
+    TILE_PX,
+    TILE_ZMAX,
+    TILE_ZMIN,
+    json,
+):
+    # ---- map cell: builds the map ONCE, empty; must never re-run --------------
+    deck = DeckMap(config=json.dumps({
+        "height": 700, "home": dict(HOME), "raster": True, "outlines": True, "under": False,
+        "labels_slot": LABELS_SLOT, "tile": TILE_PX, "extent": EXTENT,
+        "tile_zmin": TILE_ZMIN, "tile_zmax": TILE_ZMAX,
+        "fields_on": False, "rgen": 0, "fgen": 0, "debug": True,
+    }))
+    HOLD.update({
+        "ft": None, "box": None, "fids": None, "hit": None, "vs": None,
+        "busy": False, "pending": None, "task": None, "loop": None,
+        "st": None, "rstate": None, "rgen": 0, "fgen": 0, "ctl_n": None,
+        "tiles": {}, "batch": None, "h_view": None, "h_pick": None,
+        "sel_html": "", "last_status": "", "last_by_state": {},
+    })
     deck
     return (deck,)
 
@@ -1827,52 +2335,57 @@ def _(
     AEF_ZMIN,
     BATCH_S,
     CLASSES,
-    EXTENT,
-    EncodedImage,
-    FTW_RES,
-    FTW_TILE_ZMAX,
-    FTW_Y0,
+    FIELD_MAX_KM2,
+    FIELD_TILE_Z,
+    FIELD_ZOOM,
     FTW_YEARS,
     HOLD: dict,
     HOME,
-    OUTLINE_ZMIN,
-    RasterLayer,
+    SETTLE,
     TILE_CACHE,
-    TILE_PX,
-    TILE_ZMAX,
-    TILE_ZMIN,
+    ThreadPoolExecutor,
     VIEW_W,
-    VIEW_ZMIN,
     YEAR0,
     YEARS,
     asyncio,
     bbox4326,
     blank_png,
+    box_km2,
     cdl_tile_png,
     cname,
+    contains,
     deck,
     field_fill,
     field_table,
-    field_tile_png,
+    ftw_tile_polys,
     ftw_tile_rings,
     hud,
     json,
     legend_for,
+    lines_ipc,
     math,
-    morecantile,
     np,
+    pad_box,
+    poly_fids,
+    polys_ipc,
     rings_png,
     states_in,
     tile_box,
     time,
-    unproject,
     urllib,
+    view_to_bbox,
 ):
-    # ---- wiring cell: re-runs on every HUD commit (cdl-ftw.py's pattern).
-    # Everything happens IN the cell run: the acts, then ONE RasterLayer rebuilt
-    # as a NEW layer when the state changed. No threads and no timers on the
-    # serve path except the batch's own sleep; every trait assignment from a
-    # worker thread goes through loop.call_soon_threadsafe.
+    # ---- wiring cell: re-runs on every HUD commit; the map cell never re-runs.
+    # The FIELDS switch (one, on by default): below camera FIELD_ZOOM the raw
+    # CDL (crops-only optional); from it, on = the raster clipped to P(field)
+    # + the outlines, or the painted polygons over the basemap; off = the raw
+    # CDL, under the polygons too (where FTW and the CDL disagree).
+    # The HUD's acts happen IN the run (state, recolor, search); the camera and
+    # the pick arrive as widget traits and are handled by observers (re-bound
+    # every run); the field serve is an asyncio task on the kernel loop (the
+    # fold on a worker thread, every trait assignment back on the loop); the
+    # CDL tiles are pulled by deck through the widget's custom messages and
+    # served ONE BATCH PER VIEW (cdl-ftw.py's serve).
     try:
         _c = json.loads(hud.widget.ctl or "{}")
     except Exception:
@@ -1885,18 +2398,27 @@ def _(
         _paint = None
     _raster = bool(_c.get("raster", True))
     _crops = bool(_c.get("crops", False))
-    _clip = bool(_c.get("clip", False))
-    _outlines = bool(_c.get("outlines", True))
+    _fields = bool(_c.get("fields", True))   # the one switch: clip + outlines, and no raster under the polygons
+    _clip = _outlines = _fields
     _inv = bool(_c.get("inv", False))
     _sel = tuple(sorted(int(v) for v in (_c.get("sel") or [])))
-    _act = _c.get("act", "set")
-    _q = str(_c.get("q", "")).strip()
     _fyear = _year if _year in FTW_YEARS else FTW_YEARS[0]
+    # an act is applied ONCE (a re-run of this cell for any other reason must
+    # not repeat the last click of the strip)
+    _fresh = _c.get("n") != HOLD.get("ctl_n")
+    HOLD["ctl_n"] = _c.get("n")
+    _act = _c.get("act", "set") if _fresh else "set"
+    _q = str(_c.get("q", "")).strip()
+    _was = HOLD.get("st") or {}
+    _st = {"year": _year, "paint": _paint, "raster": _raster, "crops": _crops, "clip": _clip,
+           "outlines": _outlines, "inv": _inv, "sel": _sel, "fyear": _fyear}
+    HOLD["st"] = _st
 
     try:
         HOLD["loop"] = asyncio.get_running_loop()
     except RuntimeError:
         pass
+    _pool = HOLD.setdefault("pool", ThreadPoolExecutor(max_workers=4))
 
     def _say(msg):
         try:
@@ -1904,14 +2426,32 @@ def _(
         except Exception:
             pass
 
+    def _cfg(**kw):
+        c = json.loads(deck.config or "{}")
+        c.update(kw)
+        deck.config = json.dumps(c)
+
+    def _cfg_get(k, default=None):
+        try:
+            return json.loads(deck.config or "{}").get(k, default)
+        except Exception:
+            return default
+
     def _vsd(vs):
         if vs is None:
-            return None
-        if isinstance(vs, dict):
-            d = {k: vs.get(k) for k in ("longitude", "latitude", "zoom")}
-        else:
-            d = {k: getattr(vs, k, None) for k in ("longitude", "latitude", "zoom")}
-        return d if None not in d.values() else None
+            return dict(HOME)
+        if isinstance(vs, str):
+            try:
+                vs = json.loads(vs)
+            except Exception:
+                return dict(HOME)
+        try:
+            out = {"longitude": float(vs["longitude"]), "latitude": float(vs["latitude"]), "zoom": float(vs["zoom"])}
+        except Exception:
+            return dict(HOME)
+        if vs.get("w") and vs.get("h"):
+            out["w"], out["h"] = float(vs["w"]), float(vs["h"])
+        return out
 
     def _chip(code):
         return (f"<span style='display:inline-block;width:10px;height:10px;border-radius:2px;"
@@ -1953,12 +2493,13 @@ def _(
         return head + table
 
     def _selection_panel(ft):
-        if not _sel:
+        st = HOLD["st"]
+        if not st["sel"]:
             return ""
         maj, alt, agree, kept, scored = ft["maj"], ft["alt"], ft["agree"], ft["kept"], ft["scored"]
         parts = []
-        for code in _sel:
-            m = kept & ((alt == code) & scored & (agree < 0.5) if _paint == "suggests" else (maj == code))
+        for code in st["sel"]:
+            m = kept & ((alt == code) & scored & (agree < 0.5) if st["paint"] == "suggests" else (maj == code))
             if not m.any():
                 continue
             a = agree[m & scored]
@@ -1987,123 +2528,64 @@ def _(
         return s
 
     def _panel(ft):
-        return (HOLD.get("sel_html", "") + (_selection_panel(ft) if ft is not None else ""))
+        return HOLD.get("sel_html", "") + (_selection_panel(ft) if ft is not None else "")
 
-    # ---- the acts that change state BEFORE the state is fixed ---------------
-    if _act == "click":
+    def _set_panel(html):
         try:
-            _vs = _vsd(HOLD.get("vs")) or dict(HOME)
-            _lon, _lat = unproject(_vs, float(_c["px"]), float(_c["py"]), float(_c["w"]), float(_c["h"]))
-            ft = HOLD.get("ftab")
-            if ft is None or _paint is None:
-                _say("no fields on: pick a field paint and zoom in (camera ~z12)")
-            else:
-                gx = int((_lon + 180.0) / FTW_RES) - ft["fx0"]
-                gy = int((FTW_Y0 - _lat) / FTW_RES) - ft["fy0"]
-                fid = 0
-                if 0 <= gy < ft["lab"].shape[0] and 0 <= gx < ft["lab"].shape[1]:
-                    fid = int(ft["lab"][gy, gx])
-                if fid == 0 or (HOLD.get("hit") == fid and HOLD.get("hit_box") == ft["box"]):
-                    HOLD["hit"], HOLD["hit_box"], HOLD["sel_html"] = None, None, ""
-                    if fid == 0:
-                        _say(f"no field at {_lat:.4f}, {_lon:.4f}")
-                else:
-                    HOLD["hit"], HOLD["hit_box"] = fid, ft["box"]
-                    HOLD["sel_html"] = (_field_story(ft, fid, _lon, _lat)
-                                        + "<hr style='border:none;border-top:1px solid rgba(127,127,127,.25);margin:.3rem 0'>")
-                try:
-                    hud.widget.panel = _panel(ft)
-                except Exception:
-                    pass
-        except Exception as _e:
-            _say(f"click error: {type(_e).__name__}: {_e}")
-    if _act == "clear":
-        HOLD["sel_html"] = ""
-        try:
-            hud.widget.panel = ""
+            hud.widget.panel = html
         except Exception:
             pass
-    if _act == "analyze":
-        ft = HOLD.get("ftab")
-        try:
-            hud.widget.panel = (_analyze_html(ft) if ft is not None and _paint is not None
-                                else "<span style='opacity:.7'>no fields in view (pick a field paint and zoom in, camera ~z12)</span>")
-        except Exception:
-            pass
-    if _act == "refresh":
-        HOLD["layer_state"] = None
 
-    # the state: everything a tile depends on
-    _hit = (HOLD.get("hit"), HOLD.get("hit_box"))
-    _state = (_year, _paint, _raster, _crops, _clip, _outlines, _inv, _sel, _hit)
-    _tiles = HOLD.setdefault("tiles", {})
+    # ---- the CDL raster: one batch per view, PNGs cached by the raster state
+    _rstate = (_year, _raster, _crops, _clip, _sel, _outlines)
+    _tiles = HOLD["tiles"]
 
     def _rings_for(fyear, W, S, E, N, z):
-        rings, asked, fetched = ftw_tile_rings(states_in(W, S, E, N), fyear, W, S, E, N, min(z, FTW_TILE_ZMAX))
+        rings, asked, fetched = ftw_tile_rings(states_in(W, S, E, N), fyear, W, S, E, N, z)
         rb = (np.array([[r[:, 0].min(), r[:, 1].min(), r[:, 0].max(), r[:, 1].max()] for r in rings])
               if rings else np.zeros((0, 4)))
         return {"rings": rings, "bounds": rb, "n": len(rings), "tiles": asked, "fetched": fetched}
 
-    def _serve_batch(z, keys):
-        """ONE batch: the whole view's tiles at zoom z. Below AEF_ZMIN (or with
-        no field paint) the CDL raster; from AEF_ZMIN the field paint from the
-        field table over the batch's union box (cached by chunk-aligned box)."""
+    def _serve_batch(z, state, keys):
+        """ONE batch: the whole view's raster tiles at zoom z (worker thread)."""
         t0 = time.time()
+        year, raster, crops, clip, sel, outlines = state
+        fyear = year if year in FTW_YEARS else FTW_YEARS[0]
         boxes = [tile_box(z, x, y) for (_st, _z, x, y) in keys]
-        W = min(b[0] for b in boxes)
-        S = min(b[1] for b in boxes)
-        E = max(b[2] for b in boxes)
-        N = max(b[3] for b in boxes)
-        rings = _rings_for(_fyear, W, S, E, N, z) if (_outlines and z >= OUTLINE_ZMIN) else None
-        legend, phtml = None, None
-        if z >= AEF_ZMIN and _paint is not None:
-            ft = field_table(_year, W, S, E, N)
-            HOLD["ftab"] = ft
-            rgba = field_fill(ft, _paint, set(_sel), _inv)
-            hit = _hit[0] if _hit[1] == ft["box"] else None
-            pngs = [field_tile_png(ft, rgba, rings, z, x, y, hit) for (_st, _z, x, y) in keys]
-            legend = legend_for(ft, _paint, _inv)
-            t = ft["timing"]
-            a = ft["agree"][ft["scored"]]
-            sc = (f"agreement p50 {np.median(a):.2f} · {(a < 0.5).mean() * 100:.0f}% below 0.5"
-                  if len(a) else f"unscored ({len(ft['protos'])} crops have 20+ fields in view)")
-            line = (f"z{z} · {len(keys)} tiles · year {_year} · {ft['nfields']:,} crop fields · {ft['nscored']:,} scored · {sc}"
-                    + (f" · FTW {ft['fyear']} footprint" if ft["fyear"] != _year else "")
-                    + f" · {int((time.time() - t0) * 1000)} ms"
-                    + f"\nftw {t.get('ftw', 0):.1f} s · cdl {t.get('cdl', 0):.1f} · aef read {t.get('aef read', 0):.1f} s ({ft['mos_mb']:.0f} MB) · fold {t.get('aef fold', 0):.1f}"
-                    + (f" · outlines {rings['n']:,} rings" if rings else ""))
-            phtml = _panel(ft)
-        else:
-            counts = np.zeros(256, dtype=np.int64)
-            pngs = []
-            for (_st, _z, x, y) in keys:
-                if _raster:
-                    png, c = cdl_tile_png(_year, _crops, _clip, set(_sel), z, x, y, rings)
-                    counts += c
-                else:
-                    png = rings_png(z, x, y, rings) if rings else blank_png()
-                pngs.append(png)
-            tot = max(1, int(counts.sum()))
-            legend = [{"code": int(c), "name": cname(c), "hex": CLASSES[int(c)][1], "pct": round(100 * counts[c] / tot, 1), "p50": "", "note": ""}
-                      for c in np.argsort(-counts)[:24] if counts[c] > 0 and int(c) in CLASSES]
-            what = ("CDL raster" if _raster else "nothing on") + (" · crops only" if _crops else "") + (" · fields clip" if _clip else "")
-            note = "" if _paint is None else f" · fields from tile z{AEF_ZMIN} (zoom in)"
-            line = f"z{z} · {len(keys)} tiles · year {_year} · {what}{note} · {int((time.time() - t0) * 1000)} ms"
+        W, S, E, N = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                      max(b[2] for b in boxes), max(b[3] for b in boxes))
+        # the fields switch works from the field tier only: below it the raw CDL
+        # (crops-only optional), "otherwise we see all of CDL unless crops are masked"
+        tier = z >= FIELD_TILE_Z
+        rings = _rings_for(fyear, W, S, E, N, z) if (outlines and tier) else None
+        clip = clip and tier
+        counts = np.zeros(256, dtype=np.int64)
+        pngs = []
+        for (_st, _z, x, y) in keys:
+            if raster:
+                png, c = cdl_tile_png(year, crops, clip, set(sel), z, x, y, rings)
+                counts += c
+            else:
+                png = rings_png(z, x, y, rings) if rings else blank_png()
+            pngs.append(png)
+        tot = max(1, int(counts.sum()))
+        legend = [{"code": int(c), "name": cname(c), "hex": CLASSES[int(c)][1], "pct": round(100 * counts[c] / tot, 1), "p50": "", "note": ""}
+                  for c in np.argsort(-counts)[:24] if counts[c] > 0 and int(c) in CLASSES]
+        what = ("CDL raster" if raster else "nothing on") + (" · crops only" if crops else "") + (" · fields" if clip else (" · no fields" if tier else ""))
+        line = f"z{z} · {len(keys)} tiles · year {year} · {what} · {int((time.time() - t0) * 1000)} ms"
         for key, png in zip(keys, pngs):
-            if key[0] == _state:
-                _tiles[key] = EncodedImage(data=png, media_type="image/png") if png is not None else None
+            _tiles[key] = png
         if len(_tiles) > TILE_CACHE:
             for _k in list(_tiles)[:TILE_CACHE // 4]:
                 _tiles.pop(_k, None)
 
         def _push():
-            HOLD.setdefault("last_by_state", {})[_state] = line
-            _say(line)
+            HOLD["last_by_state"][state] = line
+            if HOLD["ft"] is not None and _cfg_get("fields_on"):
+                return   # the field legend and status own the strip
+            _say(_raster_line())
             try:
-                if legend is not None:
-                    hud.widget.legend = json.dumps(legend)
-                if phtml is not None:
-                    hud.widget.panel = phtml
+                hud.widget.legend = json.dumps(legend)
             except Exception:
                 pass
 
@@ -2113,8 +2595,8 @@ def _(
         else:
             _push()
 
-    def _view_tiles(z, state=None):
-        vs = _vsd(HOLD.get("vs")) or dict(HOME)
+    def _view_tiles(z, state):
+        vs = _vsd(HOLD.get("vs"))
         W, S, E, N = bbox4326(vs)
         n = 1 << z
 
@@ -2129,48 +2611,15 @@ def _(
         xs, ys = range(tx(W), tx(E) + 1), range(ty(N), ty(S) + 1)
         if len(xs) * len(ys) > 80:
             return set()
-        return {(state or _state, z, x, y) for x in xs for y in ys}
-
-    def _make_raster():
-        # the TMS must carry a boundingBox (the stock WebMercatorQuad lacks one;
-        # without it lonboard's getTileData returns null and the map is blank)
-        _t0 = morecantile.tms.get("WebMercatorQuad")
-        _m = 20037508.342789244
-        _tms0 = _t0.model_copy(update={"boundingBox": morecantile.models.TMSBoundingBox(
-            lowerLeft=(-_m, -_m), upperRight=(_m, _m), crs=_t0.crs)})
-        return RasterLayer(
-            _tile_matrix_set=_tms0,
-            _crs=_tms0.crs,
-            _fetch_tile=HOLD["fetch"],
-            _render_tile=HOLD["render"],
-            min_zoom=TILE_ZMIN,
-            max_zoom=TILE_ZMAX,
-            extent=EXTENT,
-            _tile_size=TILE_PX,
-            debounce_time=30,
-            opacity=1.0,
-            pickable=False,
-        )
-
-    def _rebuild():
-        HOLD["batch"] = None
-        HOLD["raster"] = _make_raster()
-        HOLD["layer_state"] = _state
-        deck.layers = []
-        deck.layers = [HOLD["raster"]]
-        _last = HOLD.get("last_by_state", {}).get(_state)
-        if _last is not None:
-            _say(_last + " · from cache")
-        else:
-            _say(f"year {_year} · " + ("CDL raster" if _raster else "") + (f" · fields: {_paint}" if _paint else "") + " · loading …")
+        return {(state, z, x, y) for x in xs for y in ys}
 
     async def _run_batch(b):
         try:
             await asyncio.sleep(BATCH_S)
             b["closed"] = True
-            b["keys"] |= {k for k in b["view"](b["z"], b["state"]) if k not in _tiles}
+            b["keys"] |= {k for k in _view_tiles(b["z"], b["state"]) if k not in _tiles}
             keys = sorted(b["keys"])
-            await asyncio.get_running_loop().run_in_executor(None, b["serve"], b["z"], keys)
+            await asyncio.get_running_loop().run_in_executor(_pool, _serve_batch, b["z"], b["state"], keys)
             if not b["fut"].done():
                 b["fut"].set_result(True)
         except asyncio.CancelledError:
@@ -2184,16 +2633,16 @@ def _(
                 b["fut"].set_exception(_e)
             _say(f"serve error: {type(_e).__name__}: {_e}")
 
-    async def _fetch(x, y, z):
-        key = (_state, z, x, y)
+    async def _tile_fn(z, x, y):
+        state = HOLD["rstate"]
+        key = (state, z, x, y)
         if key in _tiles:
             return _tiles[key]
         loop = asyncio.get_running_loop()
         HOLD["loop"] = loop
         b = HOLD.get("batch")
-        if b is None or b["closed"] or b["z"] != z or b["state"] != _state:
-            b = {"z": z, "state": _state, "keys": set(), "closed": False,
-                 "fut": loop.create_future(), "serve": _serve_batch, "view": _view_tiles}
+        if b is None or b["closed"] or b["z"] != z or b["state"] != state:
+            b = {"z": z, "state": state, "keys": set(), "closed": False, "fut": loop.create_future()}
             b["fut"].add_done_callback(lambda f: f.cancelled() or f.exception())
             b["task"] = loop.create_task(_run_batch(b))
             HOLD["batch"] = b
@@ -2201,85 +2650,278 @@ def _(
         await asyncio.shield(b["fut"])
         return _tiles.get(key)
 
-    def _render(tile):
-        return tile
+    deck.tile_fn = _tile_fn
 
-    HOLD["fetch"], HOLD["render"] = _fetch, _render
+    def _raster_line():
+        """The raster tier's status: the last batch line of the current raster
+        state (composed at display time; the cached line carries no note) plus
+        why the fields are not on."""
+        st = HOLD["st"]
+        line = HOLD["last_by_state"].get(HOLD["rstate"]) or (
+            f"year {st['year']} · " + ("CDL raster" if st["raster"] else "nothing on") + " · loading …")
+        if st["paint"] is None:
+            return line + " · pick a field paint"
+        if _vsd(HOLD.get("vs"))["zoom"] < FIELD_ZOOM:
+            return line + f" · fields from camera z{FIELD_ZOOM:g} (zoom in)"
+        return line
 
-    def _on_vs(change):
+    def _raster_changed():
+        HOLD["rstate"] = _rstate
+        HOLD["batch"] = None
+        HOLD["rgen"] += 1
+        _cfg(raster=_raster, outlines=_outlines, under=not _outlines, rgen=HOLD["rgen"])
+
+    # ---- the fields: the table over the padded view, the polygons for it -----
+    def _fields_off(msg=None):
+        if _cfg_get("fields_on"):
+            _cfg(fields_on=False)
         try:
-            vs = _vsd(change.new)
-            if vs is None:
-                return
-            HOLD["vs"] = vs
-            W0, S0, E0, N0 = EXTENT
-            M = 2.0
-            lon = min(max(vs["longitude"], W0 - M), E0 + M)
-            lat = min(max(vs["latitude"], S0 - M), N0 + M)
-            zoom = max(vs["zoom"], VIEW_ZMIN)
-            if ((lon, lat, zoom) != (vs["longitude"], vs["latitude"], vs["zoom"])
-                    and not HOLD.get("clamping")):
-                HOLD["clamping"] = True
-                try:
-                    deck.set_view_state(longitude=lon, latitude=lat, zoom=zoom)
-                finally:
-                    HOLD["clamping"] = False
-        except Exception as _e:
-            _say(f"camera error: {type(_e).__name__}: {_e}")
-
-    _old = HOLD.get("h_vs")
-    if _old is not None:
-        try:
-            deck.unobserve(_old, names="view_state")
+            hud.widget.legend = "[]"
         except Exception:
             pass
-    deck.observe(_on_vs, names="view_state")
-    HOLD["h_vs"] = _on_vs
+        _say(msg or _raster_line())
 
-    # ---- the search: Photon synchronously, fly, rebuild in this run ---------
-    def _photon_first(query, vs):
-        _params = {"q": query, "limit": 1, "lang": "en"}
-        if isinstance(vs, dict) and vs.get("longitude") is not None:
-            _params["lon"] = round(vs["longitude"], 4)
-            _params["lat"] = round(vs["latitude"], 4)
-        _url = "https://photon.komoot.io/api/?" + urllib.parse.urlencode(_params)
-        _req = urllib.request.Request(_url, headers={"User-Agent": "cdl-ftw-zarr-marimo cdl aef notebook"})
-        with urllib.request.urlopen(_req, timeout=10) as _r:
-            _data = json.load(_r)
-        _feats = _data.get("features") or []
-        if not _feats:
-            return None
-        _f = _feats[0]
-        _p = _f.get("properties", {})
-        _lon, _lat = _f["geometry"]["coordinates"][:2]
-        _name = ", ".join(str(v) for v in (_p.get("name"), _p.get("city"), _p.get("state")) if v) or query
-        return _name, _lon, _lat, _p.get("extent")
-
-    if _act == "search" and _q:
+    def _recolor():
+        """A paint switch, the ramp reversed, or a legend isolate: one rgba per
+        polygon from the held table's LUT, no geometry reload."""
+        ft, fids = HOLD["ft"], HOLD["fids"]
+        if ft is None or fids is None:
+            return
+        st = HOLD["st"]
+        rgba = field_fill(ft, st["paint"], set(st["sel"]), st["inv"])
+        deck.colors = np.ascontiguousarray(rgba[fids]).tobytes()
         try:
-            _hitq = _photon_first(_q, _vsd(HOLD.get("vs")))
-        except Exception as _e:
-            _hitq = None
-            _say(f"search error: {type(_e).__name__}: {_e}")
-        if _hitq is None:
-            _say(f"no match: {_q}")
-        else:
-            _name, _lon, _lat, _ext = _hitq
-            if _ext and len(_ext) == 4:
-                _span = max(abs(_ext[2] - _ext[0]), abs(_ext[1] - _ext[3]) * 2, 0.01)
-                _zoom = math.log2(360.0 * (VIEW_W / 512) / _span) - 0.3
-            else:
-                _zoom = 12.5
-            _zoom = max(3.5, min(13.5, _zoom))
-            HOLD["vs"] = {"longitude": _lon, "latitude": _lat, "zoom": _zoom}
-            deck.fly_to(longitude=_lon, latitude=_lat, zoom=_zoom, duration=2000)
-            _say(f"→ {_name}")
-            HOLD["layer_state"] = None
+            hud.widget.legend = json.dumps(legend_for(ft, st["paint"], st["inv"]))
+        except Exception:
+            pass
 
-    if HOLD.get("layer_state") != _state or HOLD.get("raster") is None:
-        _rebuild()
-    elif _act in ("click", "clear", "analyze"):
-        pass
+    def _status_for(ft, extra=""):
+        t = ft["timing"]
+        a = ft["agree"][ft["scored"]]
+        sc = (f"agreement p50 {np.median(a):.2f} · {(a < 0.5).mean() * 100:.0f}% below 0.5"
+              if len(a) else f"unscored (a crop needs 20 fields in view for a prototype; {len(ft['protos'])} have)")
+        return (f"year {ft['year']} · {ft['nfields']:,} crop fields ({ft['nlab']:,} components) · {ft['nscored']:,} scored · {sc}"
+                + (f" · FTW {ft['fyear']} footprint" if ft["fyear"] != ft["year"] else "")
+                + f"\nftw {t.get('ftw', 0):.1f} s · cdl {t.get('cdl', 0):.1f} · aef read {t.get('aef read', 0):.1f} s ({ft['mos_mb']:.0f} MB) · fold {t.get('aef fold', 0):.1f}" + extra)
+
+    async def _serve_fields(vs, force=False):
+        st = HOLD["st"]
+        vsd = _vsd(vs)
+        z = vsd["zoom"]
+        if st["paint"] is None or z < FIELD_ZOOM:
+            _fields_off()
+            return
+        view = view_to_bbox(vsd)
+        box = pad_box(view)
+        if box_km2(box) > FIELD_MAX_KM2:
+            _fields_off(f"zoom {z:.1f} · view is {box_km2(box):,.0f} km² (> {FIELD_MAX_KM2:g}); zoom in for the fields")
+            return
+        if (not force and HOLD["ft"] is not None and HOLD["box"] is not None
+                and contains(HOLD["box"], view) and HOLD["ft"]["year"] == st["year"]):
+            if not _cfg_get("fields_on"):
+                _cfg(fields_on=True, outlines=st["outlines"], under=not st["outlines"])
+                _recolor()
+                _say(HOLD.get("last_status", ""))
+            return
+        t0 = time.time()
+        _say(f"year {st['year']} · folding {box_km2(box):,.0f} km² of fields …")
+        loop = asyncio.get_running_loop()
+        yr = st["year"]
+        ft = await loop.run_in_executor(_pool, lambda: field_table(yr, *box))
+        fy = ft["fyear"]
+        t1 = time.time()
+        polys, lines = await loop.run_in_executor(
+            _pool, lambda: (ftw_tile_polys(states_in(*box), fy, *box), _rings_for(fy, *box, AEF_ZMIN)))
+        t2 = time.time()
+        fids = poly_fids(ft, polys)
+        rgba = field_fill(ft, st["paint"], set(st["sel"]), st["inv"])
+        ipc = polys_ipc(polys, fids, rgba)
+        lipc = lines_ipc(lines["rings"])
+        t3 = time.time()
+        HOLD["ft"], HOLD["box"], HOLD["fids"], HOLD["hit"], HOLD["sel_html"] = ft, box, fids, None, ""
+        HOLD["fgen"] += 1
+        deck.colors = b""
+        deck.lines = lipc
+        deck.fields = ipc
+        _cfg(fields_on=True, outlines=st["outlines"], under=not st["outlines"], fgen=HOLD["fgen"])
+        try:
+            hud.widget.legend = json.dumps(legend_for(ft, st["paint"], st["inv"]))
+        except Exception:
+            pass
+        _set_panel(_panel(ft))
+        HOLD["last_status"] = _status_for(
+            ft, f"\n{len(polys):,} polygons ({int((fids > 0).sum()):,} on a field) · {lines['n']:,} outline pieces · "
+                f"{len(ipc) / 1e6:.1f} MB · table {t1 - t0:.1f} s · tiles {t2 - t1:.1f} · arrow {t3 - t2:.1f} · {time.time() - t0:.1f} s")
+        _say(HOLD["last_status"])
+
+    async def _refresh(vs):
+        """Settle-debounced, coalescing serve (the camera must rest SETTLE s)."""
+        if HOLD["busy"]:
+            HOLD["pending"] = vs
+            return
+        HOLD["busy"] = True
+        try:
+            while True:
+                await asyncio.sleep(SETTLE)
+                if HOLD["pending"] is not None:
+                    vs, HOLD["pending"] = HOLD["pending"], None
+                    continue
+                await _serve_fields(vs)
+                vs = HOLD["pending"]
+                if vs is None:
+                    return
+                HOLD["pending"] = None
+        except Exception as exc:
+            _say(f"fields failed: {type(exc).__name__}: {exc}")
+            raise
+        finally:
+            HOLD["busy"], HOLD["pending"] = False, None
+
+    def _spawn(coro):
+        try:
+            return asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            loop = HOLD.get("loop")
+            return asyncio.run_coroutine_threadsafe(coro, loop) if loop else None
+
+    def _kick(force=False):
+        vs = HOLD["vs"] if HOLD["vs"] is not None else dict(HOME)
+        if HOLD["busy"]:
+            HOLD["pending"] = vs
+        else:
+            HOLD["task"] = _spawn(_serve_fields(vs, force=True) if force else _refresh(vs))
+
+    # ---- the camera: every moveend --------------------------------------------
+    def _on_view(change):
+        vs = change["new"]
+        if not vs:
+            return
+        HOLD["vs"] = _vsd(vs)
+        if HOLD["busy"]:
+            HOLD["pending"] = vs
+            return
+        HOLD["task"] = _spawn(_refresh(vs))
+
+    if HOLD.get("h_view") is not None:
+        try:
+            deck.unobserve(HOLD["h_view"], names="view")
+        except ValueError:
+            pass
+    deck.observe(_on_view, names="view")
+    HOLD["h_view"] = _on_view
+
+    # ---- the pick: the browser found the polygon; the kernel tells its story
+    def _on_pick(change):
+        try:
+            p = json.loads(change["new"] or "{}")
+        except Exception:
+            return
+        ft = HOLD["ft"]
+        lon, lat = p.get("lon"), p.get("lat")
+        if lon is None or lat is None:
+            return
+        if ft is None or not _cfg_get("fields_on"):
+            _say(f"no fields on at {lat:.4f}, {lon:.4f}: pick a field paint and zoom in (camera z{FIELD_ZOOM:g})")
+            return
+        if int(p.get("gen", -1)) != HOLD["fgen"]:
+            return   # a click on the previous table
+        fid = int(p.get("fid") or 0)
+        if fid > 0 and p.get("on"):
+            HOLD["hit"] = fid
+            HOLD["sel_html"] = (_field_story(ft, fid, lon, lat)
+                                + "<hr style='border:none;border-top:1px solid rgba(127,127,127,.25);margin:.3rem 0'>")
+        else:
+            HOLD["hit"], HOLD["sel_html"] = None, ""
+            if fid == 0:
+                _say(f"no field at {lat:.4f}, {lon:.4f}" + (" (a polygon off the 10 m grid)" if int(p.get("i", -1)) >= 0 else ""))
+        _set_panel(_panel(ft))
+
+    if HOLD.get("h_pick") is not None:
+        try:
+            deck.unobserve(HOLD["h_pick"], names="pick")
+        except ValueError:
+            pass
+    deck.observe(_on_pick, names="pick")
+    HOLD["h_pick"] = _on_pick
+
+    # ---- the search: Photon, then a fly ---------------------------------------
+    def _photon_first(query, vs):
+        params = {"q": query, "limit": 1, "lang": "en"}
+        if isinstance(vs, dict) and vs.get("longitude") is not None:
+            params["lon"] = round(vs["longitude"], 4)
+            params["lat"] = round(vs["latitude"], 4)
+        url = "https://photon.komoot.io/api/?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url, headers={"User-Agent": "cdl-ftw-zarr-marimo cdl aef deck notebook"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.load(r)
+        feats = data.get("features") or []
+        if not feats:
+            return None
+        f = feats[0]
+        p = f.get("properties", {})
+        lon, lat = f["geometry"]["coordinates"][:2]
+        name = ", ".join(str(v) for v in (p.get("name"), p.get("city"), p.get("state")) if v) or query
+        return name, float(lon), float(lat), p.get("extent")
+
+    async def _search(q):
+        vs = _vsd(HOLD.get("vs"))
+        try:
+            hit = await asyncio.get_running_loop().run_in_executor(_pool, _photon_first, q, vs)
+        except Exception as e:
+            _say(f"search error: {type(e).__name__}: {e}")
+            return
+        if hit is None:
+            _say(f"no match: {q}")
+            return
+        name, lon, lat, ext = hit
+        w = vs.get("w") or VIEW_W
+        if ext and len(ext) == 4:
+            span = max(abs(ext[2] - ext[0]), abs(ext[1] - ext[3]) * 2, 0.01)
+            zoom = math.log2(360.0 * (w / 512) / span) - 0.3
+        else:
+            zoom = 12.5
+        zoom = max(3.5, min(15.0, zoom))
+        deck.send({"kind": "fly", "lon": lon, "lat": lat, "zoom": zoom, "duration": 2000})
+        _say(f"→ {name} · zoom {zoom:.1f}")
+
+    # ---- the acts of THIS run ---------------------------------------------------
+    if _act == "clear":
+        HOLD["sel_html"] = ""
+        _set_panel(_panel(HOLD["ft"]))
+    if _act == "analyze":
+        ft = HOLD["ft"]
+        _set_panel(_analyze_html(ft) if ft is not None and _paint is not None and _cfg_get("fields_on")
+                   else f"<span style='opacity:.7'>no fields in view (pick a field paint and zoom in, camera z{FIELD_ZOOM:g})</span>")
+    if _act == "search" and _q:
+        _say(f"searching: {_q}")
+        HOLD["stask"] = _spawn(_search(_q))
+    if _act == "refresh":
+        _tiles.clear()
+        HOLD["last_by_state"].clear()
+        _raster_changed()
+        _kick(force=True)
+    elif HOLD.get("rstate") != _rstate:
+        _raster_changed()
+        if not _cfg_get("fields_on"):
+            _say(_raster_line())   # the tiles may all be cached: no batch, no line otherwise
+
+    if _act != "refresh":
+        if not _was or _was["year"] != _year:
+            _kick(force=True)
+        elif _was["paint"] != _paint:
+            if _paint is None:
+                _fields_off()
+            elif HOLD["ft"] is None:
+                _kick(force=True)
+            else:
+                _kick()
+                _recolor()
+        elif _paint is not None and HOLD["ft"] is not None:
+            if (_was["inv"], _was["sel"]) != (_inv, _sel):
+                _recolor()
+                _set_panel(_panel(HOLD["ft"]))
+            if _was["outlines"] != _outlines:
+                _cfg(outlines=_outlines, under=not _outlines)
     return
 
 
@@ -2303,8 +2945,8 @@ def _(mo):
 
 @app.cell
 def _(HOLD: dict, cname, mo, np, tables_btn):
-    mo.stop(not tables_btn.value or HOLD.get("ftab") is None, mo.md("*no fields folded yet*"))
-    _ft = HOLD["ftab"]
+    mo.stop(not tables_btn.value or HOLD.get("ft") is None, mo.md("*no fields folded yet*"))
+    _ft = HOLD["ft"]
     _maj, _alt, _agree, _kept, _scored, _sizes, _prev = _ft["maj"], _ft["alt"], _ft["agree"], _ft["kept"], _ft["scored"], _ft["sizes"], _ft["prev"]
     _rows = []
     for _code, _cnt in zip(*np.unique(_maj[_kept], return_counts=True)):
@@ -2323,7 +2965,7 @@ def _(HOLD: dict, cname, mo, np, tables_btn):
     _rows.sort(key=lambda r: -r["fields"])
     per_crop = mo.ui.table(_rows, selection=None)
     per_crop
-    return (per_crop,)
+    return
 
 
 if __name__ == "__main__":
