@@ -1486,14 +1486,23 @@ def _(anywidget, traitlets):
             b.style.borderColor = on ? "#2b6cb0" : "rgba(127,127,127,.45)";
             b.style.fontWeight = on ? "600" : "400";
           };
-          let paint = "viridis";
-          let raster = true, crops = false, clip = false, outlines = true;
-          const sel = new Set();
-          let seq = 0;
+          // the strip's state starts from the LAST ctl the kernel holds (a page
+          // reload or a re-render rebuilds this JS, the kernel keeps serving the
+          // old switches: "fields clip comes on without selecting", 2026-08-25)
+          let last = {};
+          try { last = JSON.parse(model.get("ctl") || "{}") || {}; } catch (e) { last = {}; }
+          const has = (k) => Object.prototype.hasOwnProperty.call(last, k);
+          let paint = has("paint") ? last.paint : "viridis";
+          let raster = has("raster") ? !!last.raster : true;
+          let crops = has("crops") ? !!last.crops : false;
+          let clip = has("clip") ? !!last.clip : false;
+          let outlines = has("outlines") ? !!last.outlines : true;
+          const sel = new Set(Array.isArray(last.sel) ? last.sel : []);
+          let seq = has("n") ? (last.n | 0) : 0;
           const send = (act, extra) => {
             model.set("ctl", JSON.stringify(Object.assign({
               act: act, paint: paint, sel: Array.from(sel), inv: inv.checked,
-              raster: raster, crops: crops, clip: clip, outlines: outlines,
+              raster: raster, crops: crops, clip: clip, outlines: outlines, labels: labelsOn,
               year: parseInt(yearSel.value, 10), n: ++seq }, extra || {})));
             model.save_changes();
           };
@@ -1516,7 +1525,7 @@ def _(anywidget, traitlets):
           let yrs = [];
           try { yrs = JSON.parse(model.get("years") || "[]"); } catch (e) { yrs = []; }
           yrs.forEach((y) => { const o = document.createElement("option"); o.value = String(y); o.textContent = String(y); yearSel.appendChild(o); });
-          yearSel.value = String(model.get("year0") || yrs[yrs.length - 1] || "");
+          yearSel.value = String(has("year") ? last.year : (model.get("year0") || yrs[yrs.length - 1] || ""));
           yearSel.addEventListener("change", () => send("year"));
           yearBox.append(yl, yearSel);
           // the raster: on/off and its two masks
@@ -1546,7 +1555,7 @@ def _(anywidget, traitlets):
             mkPaint("viridis", "color by agreement", "viridis on the agreement value: bright = agrees, dark = a lead (z12.5+); highlight disagreement reverses; click again to hide"),
             mkPaint("suggests", "AlphaEarth suggests", "a disagreeing field takes the color of the crop AlphaEarth puts it closest to, relative to this view; agreeing fields go quiet (z12.5+); click again to hide"),
           ];
-          const [invLab, inv] = mkChk("highlight disagreement", "color by agreement: reverse the ramp (bright = disagrees)", false, () => send("set"));
+          const [invLab, inv] = mkChk("highlight disagreement", "color by agreement: reverse the ramp (bright = disagrees)", has("inv") ? !!last.inv : false, () => send("set"));
           const [outLab] = mkChk("outlines", "field outlines from the FTW PMTiles, drawn on the field tiles", outlines, (v) => { outlines = v; send("set"); });
           const stylePaint = () => { paintBtns.forEach(([k, b]) => onCss(b, k === paint)); };
           stylePaint();
@@ -1615,7 +1624,7 @@ def _(anywidget, traitlets):
           clB.textContent = "× clear"; clB.style.cssText = btnCss;
           clB.onclick = () => send("clear");
           anBox.append(anB, clB);
-          let labelsOn = true;
+          let labelsOn = has("labels") ? !!last.labels : true;
           const lbB = document.createElement("button");
           lbB.textContent = "labels"; lbB.style.cssText = btnCss; lbB.title = "place labels over the map, on or off";
           const styleLb = () => onCss(lbB, labelsOn);
