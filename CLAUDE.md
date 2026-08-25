@@ -226,14 +226,13 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   boundingbox.klokantech.com) fitted to the canvas: camera z10.71. THEN
   (2026-08-25 night, "i want to start here", a screenshot at tile z11 =
   camera ~z10, the whole Delta from Rio Vista and Antioch to Lodi and
-  Stockton, wider than HOME_BOX) and he set FIELD_ZOOM = 11 himself. NOT
-  done, no coding asked: a HOME_BOX for that vantage (roughly -121.95..
-  -121.05, 37.75..38.35), and the fields at camera z10-11 need
-  FIELD_MAX_KM2 raised (that view is ~4,800 km2 padded, the cap is 1,500)
-  with a cold AEF read of ~3 GB for the box the first time; the polygons at
-  z11 are ~70 tiles / ~7,000 rings / ~3.5 MB (measured in the plan), fine.
-  The context-box question (prototypes over a big fixed area) is the same
-  question from the other side.
+  Stockton, wider than HOME_BOX): the START VIEW IS THE RASTER, that is all
+  he asked ("no i asked for the new starting view to be raster and it is");
+  nothing is folded there, no AEF cost. Not done (no coding asked): a
+  HOME_BOX for that vantage, roughly -121.95..-121.05, 37.75..38.35. He set
+  FIELD_ZOOM = 11 himself; a camera-z11 view (~1,300 km2, ~1,700 padded) is
+  ~1 GB of AEF cold and sits just above FIELD_MAX_KM2 1500 (2,000 lets it
+  through; offered, not done). Do not conflate the two again.
 - Open question he raised: the prototypes are per served box (view + 15 %),
   so at z14 few crops reach 20 fields; "looking at an area this large would
   be helpful for aef context". Directions offered, none chosen: a fixed
