@@ -233,6 +233,12 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   FIELD_ZOOM = 11 himself; a camera-z11 view (~1,300 km2, ~1,700 padded) is
   ~1 GB of AEF cold and sits just above FIELD_MAX_KM2 1500 (2,000 lets it
   through; offered, not done). Do not conflate the two again.
+- PLAN LOGGED (2026-08-25 night, not built): `docs/wide-prototypes-plan.md`,
+  prototypes fitted ONCE at the raster tier from a one-in-nine sample of the
+  AEF chunks under the wide view (the CDL is already in hand there), held in
+  HOLD, applied to every field serve inside the fit box, refit elsewhere;
+  Stephen's "we get crop data before zoom in". Earth Index (Earth Genome, 320 m
+  patches) is noted there as a side experiment, not a paint.
 - Open question he raised: the prototypes are per served box (view + 15 %),
   so at z14 few crops reach 20 fields; "looking at an area this large would
   be helpful for aef context". Directions offered, none chosen: a fixed
