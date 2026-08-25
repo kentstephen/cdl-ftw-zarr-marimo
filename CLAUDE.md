@@ -166,43 +166,53 @@ hold the full history; a copy of the FTW notes is in `docs/`.
 - The NLCD deck notebook (`x-sql-marimo/xsql-aef-nlcd-deck.py`) forked onto
   the CDL and the FTW fields, WITHOUT the hexagons (Stephen: zoomed out you
   see the raster, the hexagon folds were the slow part, "I don't necessarily
-  know if I wanna see them"). So: no H3, no DataFusion, no DuckDB; the whole
-  thing is xarray + numpy + scipy + its own deck.gl anywidget, and it runs
-  from this repo's venv with no new deps. No lonboard, so no JS patch.
-- Two tiers. Any zoom: the CDL raster, kernel-rendered 256-px tiles from the
-  majority pyramid (level = largest k with pixel <= 1.4 image px; windows
-  cached in 1024-px blocks per (group, level, year)), crops-only and the
-  P(field) pyramid clip as masks, the legend's selection isolates classes.
-  z12.5+ with a field paint on (`FIELD_ZOOM`, padded box <= 450 km2): the
-  field table (aef-agreement's: ndimage.label on P(field) >= 0.5 at 10 m, CDL
-  majority + purity by one bincount over `label*256+code`, LAST year's
-  majority too, mean AEF vector by 64 bincounts at 20 m stride) scored by the
-  deck notebook's prototype margin (TAU 0.05: 0.02 saturated on field means,
-  p50 1.00), drawn as kernel-rendered tiles from a per-field rgba LUT
-  (`fields-<fgen>` TileLayer; a paint change bumps the generation, deck
-  refetches, each tile is a LUT lookup + PNG). Outlines from the PMTiles are
-  drawn INTO the field tiles with PIL (no vector layer).
-- Paints (Stephen, 2026-08-25): CDL; "color by agreement" = viridis, bright =
-  agrees, the default; "AlphaEarth suggests" = the runner-up crop's color on
-  disagreeing fields, agreeing fields quiet grey. Highlight disagreement
-  reverses the ramp. The "agreement" paint (CDL color, alpha by agreement) is
-  COMMENTED OUT in the strip: the score is near-binary (92 % of fields at ~1),
-  so it read as plain CDL ("how is agreement helpful (its not)"); the
-  field_fill branch stays. Each paint is its own button, none greyed out (a
-  dimmed modifier button was hated). Spelling: color, not colour.
+  know if I wanna see them"). So: no H3, no DataFusion, no DuckDB; xarray +
+  numpy + scipy, runs from this repo's venv with no new deps.
+- CHASSIS: lonboard RasterLayer + the JS patch (first cell) + cdl-ftw.py's
+  whole-view batch serve + aef-agreement.py's HUD canvas click. The first
+  build (b970d50..0693f27) was a custom deck.gl anywidget with two
+  TileLayers; Stephen: "lets go back to the lonboard and patch ... i think we
+  got that smoother" (the per-tile custom-message round trip was rougher than
+  one batch per view). The wiring cell re-runs on every HUD commit; every act
+  happens in the run; ONE RasterLayer rebuilt as a NEW layer when the state
+  tuple changes (year, paint, raster, crops, clip, outlines, inv, sel, hit).
+- Two tiers by TILE zoom. Below AEF_ZMIN (13): the CDL raster (level =
+  largest k with pixel <= 1.4 image px; windows cached in 1024-px blocks per
+  (group, level, year)), crops-only and the P(field) pyramid clip as masks,
+  outlines from z12, the legend from the batch's class counts (click a class
+  to isolate). From z13 with a field paint on: the field table over the
+  batch's union box (aef-agreement's: ndimage.label on P(field) >= 0.5 at
+  10 m, CDL majority + purity by one bincount over `label*256+code`, LAST
+  year's majority too, mean AEF vector by 64 bincounts at 20 m stride; cached
+  by chunk-aligned box + year) scored by the deck notebook's prototype margin
+  (TAU 0.05: 0.02 saturated on field means), drawn from a per-field rgba LUT;
+  the CDL raster is NOT drawn under the fields (a faded field must fade to
+  the basemap). Prototypes are per batch, so a pan can nudge scores.
+- Paints: CDL; "color by agreement" = viridis, bright = agrees, the default;
+  "AlphaEarth suggests" = the runner-up crop's color on disagreeing fields,
+  agreeing fields quiet grey. Highlight disagreement reverses the ramp. The
+  "agreement" paint (CDL color, alpha by agreement) is COMMENTED OUT in the
+  strip: near-binary scores (92 % of fields at ~1) made it read as plain CDL
+  ("how is agreement helpful (its not)"); its field_fill branch stays. Each
+  paint is its own button, none greyed out (a dimmed modifier button was
+  hated). The click: gold OUTLINE on the field (not a white fill: "if it
+  disappears, you don't know what you're looking at"), same field again or
+  the basemap clears it. Spelling: color, not colour.
 - The join is positional, not keyed: the FTW 10 m grid is the frame, the CDL
   is sampled onto it through `albers_xy` (nearest), AEF shares the lat/lon
-  pitch (a floor-divide). The click is deck's lon/lat, answered from the
-  field-id image. Real deck layer ids, one widget for the map's life.
-- Verified headless under `marimo run` + playwright (2026-08-25): cold Delta
-  fold 25 s (189 MB of AEF; ftw/label/cdl/fold all < 2 s of CPU), paints
-  switch, analyze table, click story + white highlight, zoom out to the raster
-  with both masks at z7.8, year 2023 (30 m CDL) fields in 6 s, Photon search;
-  zero console errors. NOT yet seen in Stephen's browser.
-- Not done: real FTW polygons as a vector layer (the custom widget removes the
-  lonboard reasons it failed; rasterise per polygon for the numbers), clusters,
-  the three-voter categorical paint (CDL / last year / AEF), a search zoom
-  floor when a field paint is on (Champaign lands at z11.9, under the fold).
+  pitch (a floor-divide). Compute is ~0.5-1 s per cold box; the AEF chunks
+  (4 MB each, 20-40 per view) are the cost.
+- The strip initialises from the kernel's LAST ctl (a page reload rebuilds
+  the JS; before, "fields clip" showed unchecked while the kernel served it
+  clipped).
+- Verified headless under `marimo run` + playwright (2026-08-25, the lonboard
+  build): first z13 batch 5.3 s (1,619 crop fields, 566 MB of AEF), paint
+  switches ~55 ms from the cached table, click story + gold outline, year
+  2023 in 2.5 s, zoom out to the raster with both masks; no console errors.
+  Stephen ran the deck-widget build in his browser; the lonboard build he
+  has not yet.
+- Not done: real FTW polygons as a vector layer, clusters, the three-voter
+  categorical paint (CDL / last year / AEF), a search zoom floor.
 
 ## Open
 
