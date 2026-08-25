@@ -213,6 +213,32 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   has not yet.
 - Not done: real FTW polygons as a vector layer, clusters, the three-voter
   categorical paint (CDL / last year / AEF), a search zoom floor.
+- STEPHEN'S REPORTS on the lonboard build in HIS browser (2026-08-25, after
+  e82a293), NOT yet fixed, reproduce first:
+  1. "now there is a delay for data load": the batch box is the view + 35 %
+     margin (566 MB of AEF at z13 vs 189 MB in the deck-widget build) and the
+     CDL block reads are serial (cdl 4.2 s in the status). Planned: MARGIN
+     0.15, parallel block reads in cdl_window.
+  2. "fields come clipped": read as the aef-agreement seam problem (a pan's
+     new batch builds a new table over a new box; tiles from the old batch
+     stay in deck with fields cut at the old box edge, next to new tiles with
+     per-batch colors). Planned: build the field table over the batch box
+     padded by one FTW chunk (512 px, ~4.6 km) and REUSE it for every later
+     batch whose union box fits inside (contains check), so pans inside one
+     box share one table; a new table only when the view leaves it. Could
+     also mean "only the fields draw, the CDL raster is gone under them":
+     that is by design since the alpha-paint complaint; ask.
+  3. "also lost picking": the click does nothing for him. The canvas click
+     goes through the HUD's ctl (aef-agreement's onClick on the map CANVAS
+     via composedPath, a 5-px drag guard) and the wiring cell's `click` act
+     unprojects with HOLD["vs"]; headless it worked (gold outline + story,
+     s9_click.png). Reproduce in HIS session: check the kernel was restarted
+     after e82a293 (`ps -axo command | grep marimo`), check ctl arrives
+     (status line says "no field at ..." on a basemap click if it does), and
+     that HOLD["ftab"] exists (the click needs a served z13 batch with a field
+     paint on; before that it says "no fields on").
+  Rule, restated: talk before changing basic concepts; verify in HIS browser
+  before claiming a fix.
 
 ## Open
 
