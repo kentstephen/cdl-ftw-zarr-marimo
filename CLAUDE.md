@@ -182,10 +182,14 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   (`fields-<fgen>` TileLayer; a paint change bumps the generation, deck
   refetches, each tile is a LUT lookup + PNG). Outlines from the PMTiles are
   drawn INTO the field tiles with PIL (no vector layer).
-- Paints (Stephen's list, 2026-08-25): CDL; agreement = CDL color with alpha
-  by agreement, "color by agreement" = viridis bright = agrees; "AlphaEarth
-  suggests" = the runner-up crop's color on disagreeing fields, agreeing
-  fields quiet grey. Highlight disagreement reverses alpha / the ramp.
+- Paints (Stephen, 2026-08-25): CDL; "color by agreement" = viridis, bright =
+  agrees, the default; "AlphaEarth suggests" = the runner-up crop's color on
+  disagreeing fields, agreeing fields quiet grey. Highlight disagreement
+  reverses the ramp. The "agreement" paint (CDL color, alpha by agreement) is
+  COMMENTED OUT in the strip: the score is near-binary (92 % of fields at ~1),
+  so it read as plain CDL ("how is agreement helpful (its not)"); the
+  field_fill branch stays. Each paint is its own button, none greyed out (a
+  dimmed modifier button was hated). Spelling: color, not colour.
 - The join is positional, not keyed: the FTW 10 m grid is the frame, the CDL
   is sampled onto it through `albers_xy` (nearest), AEF shares the lat/lon
   pitch (a floor-divide). The click is deck's lon/lat, answered from the

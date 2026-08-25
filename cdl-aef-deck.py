@@ -34,10 +34,12 @@ paint on), the unit becomes THE FIELD:
      instead of hexagons). The runner-up is what "AlphaEarth suggests",
      relative to the crops in THIS view, not a classification.
   4. Paints, one at a time: CDL (each field its majority crop's color);
-     agreement (the CDL color, alpha follows agreement); color by agreement
-     (viridis, BRIGHT = agrees, dark = a lead); AlphaEarth suggests (a
-     disagreeing field takes the runner-up crop's color, agreeing fields go
-     quiet). Highlight disagreement reverses. The CDL raster does not draw
+     color by agreement (viridis, BRIGHT = agrees, dark = a lead);
+     AlphaEarth suggests (a disagreeing field takes the runner-up crop's
+     color, agreeing fields go quiet). Highlight disagreement reverses the
+     ramp. (An "agreement" paint, CDL color with alpha by agreement, is
+     commented out in the strip: near-binary scores made it read as plain
+     CDL; the code path stays in field_fill.) The CDL raster does not draw
      under the fields (a faded field fades to the basemap). A click outlines
      the field in gold; the same field again, or the basemap, clears it.
 
@@ -137,7 +139,6 @@ def _(mo):
     its own crop's prototype than to the best other one.
 
     - **CDL** paint: each field its majority crop's color.
-    - **agreement** paint: the CDL color, alpha follows agreement.
     - **color by agreement** paint: viridis on the agreement (bright = agrees, dark = a lead).
     - **AlphaEarth suggests** paint: a disagreeing field takes the color of the
       crop AlphaEarth puts it closest to (relative to this view); agreeing fields
@@ -1485,7 +1486,7 @@ def _(anywidget, traitlets):
             b.style.borderColor = on ? "#2b6cb0" : "rgba(127,127,127,.45)";
             b.style.fontWeight = on ? "600" : "400";
           };
-          let paint = "agreement";
+          let paint = "viridis";
           let raster = true, crops = false, clip = false, outlines = true;
           const sel = new Set();
           let seq = 0;
@@ -1538,11 +1539,14 @@ def _(anywidget, traitlets):
           };
           const paintBtns = [
             mkPaint("cdl", "CDL", "each field its CDL majority crop's color (z12.5+); click again to hide"),
-            mkPaint("agreement", "agreement", "the CDL color, alpha follows how well AlphaEarth backs the crop (z12.5+); click again to hide"),
-            mkPaint("viridis", "color by agreement", "viridis on the agreement value: bright = agrees, dark = a lead (z12.5+); click again to hide"),
+            // "agreement" (CDL color, alpha by agreement) is OUT for now (Stephen,
+            // 2026-08-25: the score is near-binary, 92% of fields at full alpha, the
+            // paint read as plain CDL; color by agreement does the job on its own):
+            // mkPaint("agreement", "agreement", "the CDL color, alpha follows how well AlphaEarth backs the crop (z12.5+); click again to hide"),
+            mkPaint("viridis", "color by agreement", "viridis on the agreement value: bright = agrees, dark = a lead (z12.5+); highlight disagreement reverses; click again to hide"),
             mkPaint("suggests", "AlphaEarth suggests", "a disagreeing field takes the color of the crop AlphaEarth puts it closest to, relative to this view; agreeing fields go quiet (z12.5+); click again to hide"),
           ];
-          const [invLab, inv] = mkChk("highlight disagreement", "agreement: reverse (the least-backed fields solid, the agreeing ones faint)", false, () => send("set"));
+          const [invLab, inv] = mkChk("highlight disagreement", "color by agreement: reverse the ramp (bright = disagrees)", false, () => send("set"));
           const [outLab] = mkChk("outlines", "field outlines from the FTW PMTiles, drawn on the field tiles", outlines, (v) => { outlines = v; send("set"); });
           const stylePaint = () => { paintBtns.forEach(([k, b]) => onCss(b, k === paint)); };
           stylePaint();
@@ -1908,7 +1912,7 @@ def _(DeckMap, EXTENT, HOLD, HOME, LABELS_SLOT, RASTER_TILE, YEAR0, json):
     }))
     HOLD.update({
         "ft": None, "box": None, "vs": None, "busy": False, "pending": None, "task": None, "loop": None,
-        "year": YEAR0, "paint": "agreement", "raster": True, "crops": False, "clip": False,
+        "year": YEAR0, "paint": "viridis", "raster": True, "crops": False, "clip": False,
         "outlines": True, "inv": False, "labels": True,
         "sel": set(), "hit": None, "rings": None, "rgba": None, "rgen": 0, "fgen": 0,
         "tiles": {}, "h_cam": None, "h_ctl": None, "h_pick": None,
