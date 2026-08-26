@@ -205,11 +205,31 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   boundaries ... agreement is only fields for this use case subject to
   change"). Three encodings at full strength in one frame (CDL class hues on
   the raster pixels BETWEEN the fields, viridis on the fields, silver
-  boundaries) do not resolve. So `cfg.raster_dim` (map config, DEFAULT 0):
-  under the polygons the TileLayer draws at that opacity, and at 0 it is not
-  drawn at all (`rasterOn` in the JS), so with a paint up the CDL raster
-  switch has no visible effect until you drop the paint. Raise it for a
-  backdrop, 1 for the old full strength.
+  boundaries) do not resolve. So `cfg.raster_dim` (map config): under the
+  polygons the TileLayer draws at that opacity, and at 0 it is not drawn at
+  all (`rasterOn` in the JS).
+- THE BACKDROP, `raster_dim` NOW 0.3 (Stephen, 2026-08-26: "still struggling
+  with the logic of this control panel because cdl raster is selected even
+  when we don't see it, which is confusing. So maybe gray out. I don't know if
+  that's even right because if someone wants to unselect it", then "try 3").
+  At 0 the CDL raster SWITCH was inert under a paint: checked, showing
+  nothing. The diagnosis put to him: the panel presents three coequal layer
+  switches while the app runs two mutually exclusive READING MODES, and the
+  paint silently overrides the raster. Three routes were named: grey it out
+  (breaks his hidden-not-greyed rule, and a disabled checked box still lies),
+  hide it like crops only (churn, and the real gesture for getting the raster
+  back is dropping the paint), or MAKE THE SWITCH TRUE, which he chose: a dim
+  backdrop, so raster ON under a paint = CDL between the fields, OFF = bare
+  basemap, and nothing in the panel is ever greyed, hidden or inert. It is not
+  a second reading of the same pixels: the polygons cover their own ground, so
+  the backdrop is the SURROUND. 0 brings the old rule back (and with it the
+  inert switch and the crops-only hide), 1 is full strength.
+- KNOCK-ON, flagged not changed: the fills are not opaque (ALPHA_FLAT 220,
+  ALPHA_RAMP 225), so ~12 % of the backdrop bleeds through every field. Where
+  it will really show is the fields that SIT OUT (QUIET at alpha 45) and the
+  legend isolate's dimmed fields (DIM_ALPHA 22), which now fall back to CDL
+  color instead of the basemap: that weakens the isolate. If it reads badly,
+  either drop `raster_dim`, or make the fills opaque while a backdrop is up.
 - COLLAPSE / EXPAND (Stephen, 2026-08-26, after two rounds of placement: the
   collapse caret "needs to be at the top right not in the middle ... on the
   same line all the way over to the right as year and the other top params",
@@ -383,7 +403,10 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   So: raster switch off, or a field paint drawing polygons at raster_dim 0 ->
   gone; below the field floor with a paint lit the raster IS the picture, so it
   stays. It matches the serve: with `raster` False `_serve_batch` draws rings or
-  a blank and `crops` reaches nothing.
+  a blank and `crops` reaches nothing. SINCE raster_dim went to 0.3 this is just
+  the raster switch (the backdrop is CDL, so crops only still modifies what you
+  see between the fields); the rule stays because it is written against the
+  config, not against a constant.
 - STILL OPEN on that button, reading (2), no direction chosen: on Dark Matter it
   punches the non-crop classes to transparent, so pasture, water and developed
   read as MISSING DATA rather than "not a crop"; drawing them as one muted tone

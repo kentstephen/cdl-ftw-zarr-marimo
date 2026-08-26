@@ -42,8 +42,9 @@ paint on), the unit becomes THE FIELD:
      disagreement reverses the
      ramp. (An "agreement" paint, CDL color with alpha by agreement, is
      commented out in the strip: near-binary scores made it read as plain
-     CDL; the code path stays in field_fill.) The CDL raster does not draw
-     under the fields (a faded field fades to the basemap). A click outlines
+     CDL; the code path stays in field_fill.) Under a paint the CDL raster
+     is a dim BACKDROP (raster_dim 0.3), so it is seen only between the
+     fields and its switch still does something. A click outlines
      the field in gold; the same field again, or the basemap, clears it.
 
 The map is a deck.gl 9.3.10 anywidget (the HRRR counties film's pinned
@@ -1885,9 +1886,10 @@ def _(anywidget, traitlets):
           rasterBox.append(rasLab, cropLab, fldLab);
           // crops only MODIFIES THE RASTER, so it is there only while the
           // raster is on screen: gone with the switch off, and gone under a
-          // field paint (the paint is the fields alone, raster_dim 0), the
-          // same rule as highlight disagreement under color by agreement.
-          // Hidden, not greyed; the checkbox keeps its value for its return.
+          // field paint IF that paint hides the raster (raster_dim 0; at the
+          // 0.3 backdrop the raster is still drawn, so it stays). The same
+          // rule as highlight disagreement under color by agreement. Hidden,
+          // not greyed; the checkbox keeps its value for its return.
           const styleCrops = () => {
             cropLab.style.display = model.get("rasteron") === false ? "none" : "inline-flex";
           };
@@ -2502,11 +2504,20 @@ def _(
     # ---- map cell: builds the map ONCE, empty; must never re-run --------------
     deck = DeckMap(config=json.dumps({
         "height": 700, "home": dict(HOME), "raster": True, "outlines": True,
-        # the raster's opacity UNDER the painted polygons. 0: a field paint is a
-        # reading of CDL x AlphaEarth INSIDE the boundaries, so the raster is not
-        # part of it (Stephen, 2026-08-26: "agreement is only fields for this use
-        # case subject to change"). Raise it for a backdrop, 1 for full strength.
-        "raster_dim": 0.0,
+        # the raster's opacity UNDER the painted polygons. It was 0 (a field
+        # paint is a reading of CDL x AlphaEarth INSIDE the boundaries, so the
+        # raster is not part of it, Stephen 2026-08-26: "agreement is only
+        # fields for this use case subject to change"), which made the CDL
+        # raster switch INERT under a paint: checked, showing nothing. A
+        # BACKDROP instead makes the switch true in every state, so nothing in
+        # the panel is greyed or hidden: the polygons cover their own ground,
+        # so the backdrop is the SURROUND, not a second reading of the same
+        # pixels. The fills are NOT opaque though (ALPHA_FLAT 220, ALPHA_RAMP
+        # 225, ~12 % of the backdrop through), and where that will show is the
+        # fields that sit out (QUIET at alpha 45) and the isolate's dimmed ones
+        # (DIM_ALPHA 22). 0 brings the old rule back (and the inert switch with
+        # it), 1 is full strength.
+        "raster_dim": 0.3,
         "labels_slot": LABELS_SLOT, "tile": TILE_PX, "extent": EXTENT,
         "tile_zmin": TILE_ZMIN, "tile_zmax": TILE_ZMAX,
         "fields_on": False, "rgen": 0, "fgen": 0, "debug": True,
@@ -2578,7 +2589,7 @@ def _(
     # ---- wiring cell: re-runs on every HUD commit; the map cell never re-runs.
     # THREE INDEPENDENT LAYERS: the CDL raster (its switch, crops-only its
     # modifier, on by default), the painted polygons (the paint buttons, none
-    # selected = none, and under a paint the raster is not drawn: cfg
+    # selected = none; under a paint the raster is a dim backdrop, cfg
     # raster_dim), the field outlines (its own switch, from the field tier).
     # The fields come on at _field_floor(): FIELD_ZOOM, or higher on a canvas
     # big enough that the padded box would blow FIELD_MAX_KM2 there.
@@ -2640,7 +2651,9 @@ def _(
         (its modifier and nothing else) can go with it: the switch off, or a
         field paint drawing the polygons with raster_dim 0 (the raster not drawn
         at all). Stephen, 2026-08-26, the same shape as highlight disagreement
-        belonging to color by agreement."""
+        belonging to color by agreement. With the backdrop (raster_dim > 0) this
+        is just the raster switch: the backdrop is CDL, so crops only still
+        modifies what you see between the fields."""
         try:
             dim = float(c.get("raster_dim") or 0)
         except (TypeError, ValueError):
