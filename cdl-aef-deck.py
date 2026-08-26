@@ -17,11 +17,14 @@
 # ///
 """CDL, backed or not by AlphaEarth, on the Fields of the World: the deck.gl build.
 
-Zoomed out, at ANY zoom, the map is the Cropland Data Layer as a picture:
-tiles the kernel renders from the icechunk store's majority pyramid (30 m
-2008-2025, 10 m 2024-2025), the same read as cdl-ftw.py, with a crops-only
-mask and the P(field) clip as toggles. Zoomed in (camera z12+, a field
-paint on), the unit becomes THE FIELD:
+ONE SELECTOR runs the map: the paint buttons, CDL by default, click again for
+none. Zoomed out, whatever is selected, the picture is the Cropland Data Layer
+as a raster: tiles the kernel renders from the icechunk store's majority
+pyramid (30 m 2008-2025, 10 m 2024-2025), the same read as cdl-ftw.py, with
+crops only as its modifier. From the field tier (camera z11+, one rule,
+_field_floor) the unit becomes THE FIELD and the selected paint draws the
+fields as polygons, masked to their boundaries. CDL carries a second modifier
+there, "fields only": uncheck it and the CDL stays the raw raster at any zoom.
 
   1. The fields in view are the connected components of FTW P(field) >= 0.5
      at 10 m (scipy.ndimage.label on one window of the probability Zarr).
@@ -43,8 +46,9 @@ paint on), the unit becomes THE FIELD:
      ramp. (An "agreement" paint, CDL color with alpha by agreement, is
      commented out in the strip: near-binary scores made it read as plain
      CDL; the code path stays in field_fill.) The CDL raster does not draw
-     under the fields (a faded field fades to the basemap). A click outlines
-     the field in gold; the same field again, or the basemap, clears it.
+     under the fields (a faded field fades to the basemap; tried as a dim
+     backdrop 2026-08-26, reverted: the palettes collide in hue). A click
+     outlines the field in gold; the same field again, or the basemap, clears it.
 
 The map is a deck.gl 9.3.10 anywidget (the HRRR counties film's pinned
 esm.sh graph inside maplibre, docs/deck-geoarrow-fields-plan.md). Zoomed
@@ -151,15 +155,19 @@ def _(mo):
 
     # CDL, backed or not by AlphaEarth, on the Fields of the World
 
-    Zoomed out: the **Cropland Data Layer** as a picture, at any zoom (the
-    store's majority pyramid), with *crops only* and the *fields* clip as
-    masks. Zoomed in past **z12** with a field paint on, each **Fields of the
-    World** field gets its CDL majority crop, last year's crop, and its mean
-    **AlphaEarth** vector; per view every crop with enough fields gets a
-    prototype, and a field's *agreement* is how much closer its vector sits to
-    its own crop's prototype than to the best other one.
+    Zoomed out: the **Cropland Data Layer** as a picture (the store's majority
+    pyramid), *crops only* its modifier. Zoom in past the field floor and the
+    unit becomes the field: each **Fields of the World** field gets its CDL
+    majority crop, last year's crop, and its mean **AlphaEarth** vector; per
+    view every crop with enough fields gets a prototype, and a field's
+    *agreement* is how much closer its vector sits to its own crop's prototype
+    than to the best other one. The buttons are one selector, **CDL** to start;
+    click the lit one again for the basemap alone. The map says when you are
+    zoomed out too far for the paint you picked.
 
-    - **CDL** paint: each field its majority crop's color.
+    - **CDL**: the raster zoomed out, each field in its majority crop's color
+      zoomed in. *crops only* drops the non-crop classes; *fields only* (from
+      the field tier) is what makes it the fields, uncheck it for the raw raster.
     - **color by agreement** paint: viridis on the agreement (bright = agrees, dark = a lead).
     - **AlphaEarth suggests** paint: every field in the CDL color of the crop
       AlphaEarth puts it closest to (relative to this view): its own where
@@ -1803,8 +1811,10 @@ def _(anywidget, traitlets):
         "should be able to disable all layers"): the CDL raster (its switch,
         crops only its modifier), the painted polygons (the paint buttons:
         CDL / color by agreement / AlphaEarth suggests, one at a time, click
-        again for none), the field outlines (its own switch, no longer the
-        raster's clip). Plus highlight disagreement, analyze, refresh, search,
+        again for none, CDL by default and nothing auto-selects another), CDL's
+        two modifiers (crops only, and fields only from the field tier), and the
+        field boundaries (its own switch, the silver lines, never the mask).
+        Plus highlight disagreement, analyze, refresh, search,
         the pickable legend, panel and status lines, and the collapse button
         (top right; the expand button sits at the screen's bottom right).
         Every commit re-runs the wiring cell (marimo), where the acts happen
@@ -1816,11 +1826,11 @@ def _(anywidget, traitlets):
         status = traitlets.Unicode("").tag(sync=True)
         legend = traitlets.Unicode("").tag(sync=True)
         panel = traitlets.Unicode("").tag(sync=True)
-        # is the CDL raster actually DRAWN right now (its switch on, and not
-        # hidden under a field paint)? "crops only" is a modifier of that
-        # raster and nothing else, so it exists only while this is true, the
-        # way highlight disagreement exists only under color by agreement.
-        rasteron = traitlets.Bool(True).tag(sync=True)
+        # is the camera at or past _field_floor(), i.e. can the fields draw?
+        # "fields only" is offered only there (below it there is no field tier
+        # to narrow the raster to). crops only needs no trait: it belongs to
+        # the CDL button, which the strip holds itself.
+        fieldtier = traitlets.Bool(False).tag(sync=True)
 
         _esm = r"""
         function render({ model, el }) {
@@ -1842,17 +1852,21 @@ def _(anywidget, traitlets):
           let last = {};
           try { last = JSON.parse(model.get("ctl") || "{}") || {}; } catch (e) { last = {}; }
           const has = (k) => Object.prototype.hasOwnProperty.call(last, k);
-          let paint = has("paint") ? last.paint : "viridis";
-          let raster = has("raster") ? !!last.raster : true;
+          // ONE SELECTOR (Stephen, 2026-08-26): the CDL button is the CDL, raster
+          // when zoomed out and the fields when zoomed in; there is no separate
+          // "CDL raster" switch to contradict it. CDL is the default paint and
+          // nothing ever auto-selects another one.
+          let paint = has("paint") ? last.paint : "cdl";
           let crops = has("crops") ? !!last.crops : true;
-          let outlinesOn = has("outlines") ? !!last.outlines : (has("fields") ? !!last.fields : true);
+          let mask = has("mask") ? !!last.mask : true;
+          let outlinesOn = has("outlines") ? !!last.outlines : false;
           let open = true;
           const sel = new Set(Array.isArray(last.sel) ? last.sel : []);
           let seq = has("n") ? (last.n | 0) : 0;
           const send = (act, extra) => {
             model.set("ctl", JSON.stringify(Object.assign({
               act: act, paint: paint, sel: Array.from(sel), inv: inv.checked,
-              raster: raster, crops: crops, outlines: outlinesOn,
+              crops: crops, mask: mask, outlines: outlinesOn,
               year: parseInt(yearSel.value, 10), n: ++seq }, extra || {})));
             model.save_changes();
           };
@@ -1877,26 +1891,16 @@ def _(anywidget, traitlets):
           yearSel.value = String(has("year") ? last.year : (model.get("year0") || yrs[yrs.length - 1] || ""));
           yearSel.addEventListener("change", () => send("set"));
           yearBox.append(yl, yearSel);
+          // CDL's two modifiers (they live next to that button, below), then the
+          // boundaries, which belong to no paint and sit on their own.
+          const [cropLab] = mkChk("crops only", "CDL: drop the non-crop classes", crops, (v) => { crops = v; send("set"); });
+          const [maskLab] = mkChk("fields only", "CDL: keep it inside the field boundaries (the fields as polygons, clickable). Off: the raw CDL raster at this zoom too", mask, (v) => { mask = v; send("set"); });
           const rasterBox = document.createElement("span");
           rasterBox.style.cssText = "display:inline-flex;gap:.6rem;align-items:center";
-          const [rasLab] = mkChk("CDL raster", "the Cropland Data Layer as tiles, at any zoom (not under the fields)", raster, (v) => { raster = v; send("set"); });
-          const [cropLab] = mkChk("crops only", "raster: drop the non-crop classes", crops, (v) => { crops = v; send("set"); });
-          const [fldLab] = mkChk("field outlines", "the Fields of the World boundaries as silver lines (from camera z11); independent of the raster and of the paint", outlinesOn, (v) => { outlinesOn = v; send("set"); });
-          rasterBox.append(rasLab, cropLab, fldLab);
-          // crops only MODIFIES THE RASTER, so it is there only while the
-          // raster is on screen: gone with the switch off, and gone under a
-          // field paint (the paint is the fields alone, raster_dim 0), the
-          // same rule as highlight disagreement under color by agreement.
-          // Hidden, not greyed; the checkbox keeps its value for its return.
-          const styleCrops = () => {
-            cropLab.style.display = model.get("rasteron") === false ? "none" : "inline-flex";
-          };
-          model.on("change:rasteron", styleCrops);
-          styleCrops();
+          const [fldLab] = mkChk("field boundaries", "the Fields of the World boundaries as silver lines (from camera z11); independent of the paint, and never the mask: the paints stay field-shaped with this off", outlinesOn, (v) => { outlinesOn = v; send("set"); });
+          rasterBox.append(fldLab);
           const paintBox = document.createElement("span");
           paintBox.style.cssText = "display:inline-flex;gap:.3rem;align-items:center";
-          const pl = document.createElement("span");
-          pl.textContent = "fields";
           const mkPaint = (key, text, title) => {
             const b = document.createElement("button");
             b.textContent = text; b.title = title; b.style.cssText = btnCss;
@@ -1904,7 +1908,7 @@ def _(anywidget, traitlets):
             return [key, b];
           };
           const paintBtns = [
-            mkPaint("cdl", "CDL", "each field its CDL majority crop's color (from camera z11); click again to hide"),
+            mkPaint("cdl", "CDL", "the Cropland Data Layer: the raster zoomed out, the fields in their crop's color zoomed in; click again to hide"),
             // "agreement" (CDL color, alpha by agreement) is OUT for now (Stephen,
             // 2026-08-25: near-binary scores made it read as plain CDL):
             // mkPaint("agreement", "agreement", "the CDL color, alpha follows how well AlphaEarth backs the crop; click again to hide"),
@@ -1918,12 +1922,22 @@ def _(anywidget, traitlets):
           // the selection ... should be next to color by agreement")
           const stylePaint = () => {
             paintBtns.forEach(([k, b]) => onCss(b, k === paint));
+            const cdl = paint === "cdl";
+            cropLab.style.display = cdl ? "inline-flex" : "none";
+            // "fields only" narrows the CDL to the field tier, so it is offered
+            // only where that tier exists (the kernel says: fieldtier)
+            maskLab.style.display = cdl && model.get("fieldtier") ? "inline-flex" : "none";
             invLab.style.display = paint === "viridis" ? "inline-flex" : "none";
             if (paint !== "viridis") inv.checked = false;
           };
+          model.on("change:fieldtier", stylePaint);
           stylePaint();
-          const paintKids = [pl];
-          paintBtns.forEach(([k, b]) => { paintKids.push(b); if (k === "viridis") paintKids.push(invLab); });
+          const paintKids = [];
+          paintBtns.forEach(([k, b]) => {
+            paintKids.push(b);
+            if (k === "cdl") paintKids.push(cropLab, maskLab);
+            if (k === "viridis") paintKids.push(invLab);
+          });
           paintBox.append(...paintKids);
           const legendBox = document.createElement("div");
           legendBox.style.cssText =
@@ -2066,7 +2080,7 @@ def _(anywidget, traitlets):
           const topRow = document.createElement("div");
           topRow.style.cssText =
             "display:flex;flex-wrap:wrap;align-items:center;gap:.6rem 1rem;flex:1 1 100%";
-          topRow.append(yearBox, rasterBox, paintBox, colB);
+          topRow.append(yearBox, paintBox, rasterBox, colB);
           box.append(topRow, anBox, legendBox);
           const panel = document.createElement("div");
           panel.style.cssText = "font:13.5px ui-sans-serif,system-ui,sans-serif;padding:.25rem 0";
@@ -2501,7 +2515,7 @@ def _(
 ):
     # ---- map cell: builds the map ONCE, empty; must never re-run --------------
     deck = DeckMap(config=json.dumps({
-        "height": 700, "home": dict(HOME), "raster": True, "outlines": True,
+        "height": 700, "home": dict(HOME), "raster": True, "outlines": False,
         # the raster's opacity UNDER the painted polygons. 0: a field paint is a
         # reading of CDL x AlphaEarth INSIDE the boundaries, so the raster is not
         # part of it (Stephen, 2026-08-26: "agreement is only fields for this use
@@ -2576,10 +2590,12 @@ def _(
     view_to_bbox,
 ):
     # ---- wiring cell: re-runs on every HUD commit; the map cell never re-runs.
-    # THREE INDEPENDENT LAYERS: the CDL raster (its switch, crops-only its
-    # modifier, on by default), the painted polygons (the paint buttons, none
-    # selected = none, and under a paint the raster is not drawn: cfg
-    # raster_dim), the field outlines (its own switch, from the field tier).
+    # ONE SELECTOR: the paint buttons. CDL (the default) is the raster zoomed
+    # out and the fields zoomed in, with crops only and fields only as ITS
+    # modifiers; the other paints are the fields alone; no paint is the
+    # basemap. The field boundaries are their own switch, the silver lines and
+    # nothing else (off by default, and never the mask: the paints are
+    # field-shaped because they are polygons).
     # The fields come on at _field_floor(): FIELD_ZOOM, or higher on a canvas
     # big enough that the padded box would blow FIELD_MAX_KM2 there.
     # The HUD's acts happen IN the run (state, recolor, search); the camera and
@@ -2595,20 +2611,29 @@ def _(
     _year = int(_c.get("year", YEAR0))
     if _year not in YEARS:
         _year = YEAR0
-    _paint = _c.get("paint", "viridis") if "paint" in _c else "viridis"
+    # ONE SELECTOR (Stephen, 2026-08-26): the paint buttons are the whole layer
+    # choice. CDL is the default and means the CDL at whatever tier the camera
+    # is in: the raster zoomed out, the fields zoomed in. Nothing auto-selects
+    # another paint. No paint = the basemap.
+    _paint = _c.get("paint", "cdl") if "paint" in _c else "cdl"
     if _paint not in ("cdl", "agreement", "viridis", "suggests"):
         _paint = None
-    _raster = bool(_c.get("raster", True))
     _crops = bool(_c.get("crops", True))
-    # THREE INDEPENDENT LAYERS (Stephen, 2026-08-26: "should be able to disable
-    # all layers"): the CDL raster (its own switch, crops-only its modifier),
-    # the painted polygons (the paint buttons: none selected = no polygons),
-    # the field outlines (this switch). The raster's CLIP to P(field) is retired
-    # with the old one-switch design (the CDL paint draws the same picture as
-    # polygons, and the raster is "a separate product", his words); _clip is
-    # still threaded through the serve, so it is one line to bring back.
-    _outlines = bool(_c.get("outlines", _c.get("fields", True)))
+    # "fields only", CDL's second modifier: on = the fields as polygons from the
+    # field tier, off = the raw CDL raster at every zoom (no polygons, no pick).
+    # It cannot apply to the other paints: they ARE per-field values.
+    _mask = bool(_c.get("mask", True))
+    # the boundaries: the silver lines only, off by default (Stephen,
+    # 2026-08-26). It is not the mask, and turning it off masks nothing: the
+    # paints are field-shaped because they are polygons. The raster's CLIP to
+    # P(field) stays retired (_clip False, still threaded through the serve):
+    # "fields only" gets the same picture by drawing the polygons instead.
+    _outlines = bool(_c.get("outlines", False))
     _clip = False
+    # the polygons are the picture from the field tier (every paint but an
+    # unmasked CDL); below the tier it is the raster, whatever is selected
+    _polys = _paint is not None and not (_paint == "cdl" and not _mask)
+    _raster = _paint is not None
     _inv = bool(_c.get("inv", False)) and _paint == "viridis"   # it modifies that paint only
     _sel = tuple(sorted(int(v) for v in (_c.get("sel") or [])))
     _fyear = _year if _year in FTW_YEARS else FTW_YEARS[0]
@@ -2620,7 +2645,8 @@ def _(
     _q = str(_c.get("q", "")).strip()
     _was = HOLD.get("st") or {}
     _st = {"year": _year, "paint": _paint, "raster": _raster, "crops": _crops, "clip": _clip,
-           "outlines": _outlines, "inv": _inv, "sel": _sel, "fyear": _fyear}
+           "outlines": _outlines, "inv": _inv, "sel": _sel, "fyear": _fyear,
+           "mask": _mask, "polys": _polys}
     HOLD["st"] = _st
 
     try:
@@ -2635,19 +2661,13 @@ def _(
         except Exception:
             pass
 
-    def _sync_crops(c):
-        """Tell the strip whether the CDL raster is on screen, so "crops only"
-        (its modifier and nothing else) can go with it: the switch off, or a
-        field paint drawing the polygons with raster_dim 0 (the raster not drawn
-        at all). Stephen, 2026-08-26, the same shape as highlight disagreement
-        belonging to color by agreement."""
+    def _sync_tier(on):
+        """Tell the strip whether the camera is at the field tier, so CDL's
+        "fields only" is offered exactly where there is a field tier to narrow
+        to. crops only needs no trait: it belongs to the CDL button, which the
+        strip holds itself."""
         try:
-            dim = float(c.get("raster_dim") or 0)
-        except (TypeError, ValueError):
-            dim = 0.0
-        drawn = bool(c.get("raster", True)) and not (bool(c.get("fields_on")) and dim <= 0)
-        try:
-            hud.widget.rasteron = drawn
+            hud.widget.fieldtier = bool(on)
         except Exception:
             pass
 
@@ -2655,7 +2675,6 @@ def _(
         c = json.loads(deck.config or "{}")
         c.update(kw)
         deck.config = json.dumps(c)
-        _sync_crops(c)
 
     def _cfg_get(k, default=None):
         try:
@@ -2763,11 +2782,11 @@ def _(
             pass
 
     # ---- the CDL raster: one batch per view, PNGs cached by the raster state
-    # the raster tiles carry the outlines only when the polygons are NOT up
-    # (with a paint on, the polygon layer's PathLayer draws them): as part of
-    # the raster state, toggling the outlines under a paint costs no refetch
-    _rings_on = _outlines and _paint is None
-    _rstate = (_year, _raster, _crops, _clip, _sel, _rings_on)
+    # the raster tiles carry the boundaries only when the polygons are NOT up
+    # (with them up, the polygon layer's PathLayer draws them): as part of the
+    # raster state, toggling the boundaries under a paint costs no refetch
+    _rings_on = _outlines and not _polys
+    _rstate = (_year, _raster, _crops, _clip, _sel, _rings_on, _polys)
     _tiles = HOLD["tiles"]
 
     def _rings_for(fyear, W, S, E, N, z):
@@ -2779,16 +2798,19 @@ def _(
     def _serve_batch(z, state, keys):
         """ONE batch: the whole view's raster tiles at zoom z (worker thread)."""
         t0 = time.time()
-        year, raster, crops, clip, sel, rings_on = state
+        year, raster, crops, clip, sel, rings_on, polys = state
         fyear = year if year in FTW_YEARS else FTW_YEARS[0]
         boxes = [tile_box(z, x, y) for (_st, _z, x, y) in keys]
         W, S, E, N = (min(b[0] for b in boxes), min(b[1] for b in boxes),
                       max(b[2] for b in boxes), max(b[3] for b in boxes))
-        # the fields switch works from the field tier only: below it the raw CDL
-        # (crops-only optional), "otherwise we see all of CDL unless crops are masked"
+        # the field tier is the polygons' ground: there the raster serves BLANKS
+        # rather than the CDL the polygons are about to replace (his judder TODO:
+        # "should just render as agreement"). Below it, the raster is the picture
+        # whatever is selected, crops-only optional.
         tier = z >= FIELD_TILE_Z
         rings = _rings_for(fyear, W, S, E, N, z) if (rings_on and tier) else None
         clip = clip and tier
+        raster = raster and not (tier and polys)
         counts = np.zeros(256, dtype=np.int64)
         pngs = []
         for (_st, _z, x, y) in keys:
@@ -2801,7 +2823,7 @@ def _(
         tot = max(1, int(counts.sum()))
         legend = [{"code": int(c), "name": cname(c), "hex": CLASSES[int(c)][1], "pct": round(100 * counts[c] / tot, 1), "p50": "", "note": ""}
                   for c in np.argsort(-counts)[:24] if counts[c] > 0 and int(c) in CLASSES]
-        what = ("CDL raster" if raster else "no raster") + (" · crops only" if crops else "") + (" · outlines" if rings is not None else "")
+        what = ("CDL raster" if raster else "no raster") + (" · crops only" if crops else "") + (" · boundaries" if rings is not None else "")
         line = f"z{z} · {len(keys)} tiles · year {year} · {what} · {int((time.time() - t0) * 1000)} ms"
         for key, png in zip(keys, pngs):
             _tiles[key] = png
@@ -2897,6 +2919,9 @@ def _(
         need = vsd["zoom"] + 0.5 * math.log2(km2 / FIELD_MAX_KM2)
         return max(FIELD_ZOOM, math.ceil(need * 10) / 10)
 
+    _PAINT_NAME = {"cdl": "the CDL fields", "viridis": "color by agreement",
+                  "suggests": "AlphaEarth suggests", "agreement": "agreement"}
+
     def _raster_line():
         """The raster tier's status: the last batch line of the current raster
         state (composed at display time; the cached line carries no note) plus
@@ -2905,11 +2930,13 @@ def _(
         line = HOLD["last_by_state"].get(HOLD["rstate"]) or (
             f"year {st['year']} · " + ("CDL raster" if st["raster"] else "nothing on") + " · loading …")
         if st["paint"] is None:
-            return line + " · pick a field paint"
+            return line + " · nothing selected"
         _v = _vsd(HOLD.get("vs"))
         _fl = _field_floor(_v)
         if _v["zoom"] < _fl:
-            return line + f" · fields from camera z{_fl:.1f} (zoom in)"
+            return line + f" · the fields from camera z{_fl:.1f} (zoom in)"
+        if not st["polys"]:
+            return line + " · fields only is off"
         return line
 
     def _raster_changed():
@@ -2958,17 +2985,26 @@ def _(
         st = HOLD["st"]
         vsd = _vsd(vs)
         z = vsd["zoom"]
+        floor = _field_floor(vsd)
+        _sync_tier(z >= floor)      # CDL's "fields only" is offered from here up
         if st["paint"] is None:
-            _fields_off()
+            _fields_off(note="")
+            return
+        if not st["polys"]:         # CDL with "fields only" off: the raw raster
+            _fields_off(note="")
             return
         view = view_to_bbox(vsd)
         box = pad_box(view)
-        floor = _field_floor(vsd)
         if z < floor:
+            # the indication he asked for: you are on the raster, and this is the
+            # zoom that buys you the fields (and with them the other paints)
             msg = f"zoom {z:.1f} · fields from camera z{floor:.1f} (zoom in)"
             if floor > FIELD_ZOOM:
                 msg += f" · {box_km2(box):,.0f} km² in view here, the fold caps at {FIELD_MAX_KM2:g}"
-            _fields_off(msg, note=f"this is the CDL raster · the field paint needs camera z{floor:.1f}")
+            note = (f"this is the CDL raster · the fields and the other paints need camera z{floor:.1f}"
+                    if st["paint"] == "cdl" else
+                    f"this is the CDL raster · {_PAINT_NAME.get(st['paint'], 'the field paint')} needs camera z{floor:.1f}")
+            _fields_off(msg, note=note)
             return
         if (not force and HOLD["ft"] is not None and HOLD["box"] is not None
                 and contains(HOLD["box"], view) and HOLD["ft"]["year"] == st["year"]):
@@ -3075,8 +3111,8 @@ def _(
         if lon is None or lat is None:
             return
         if ft is None or not _cfg_get("fields_on"):
-            _say(f"no fields on at {lat:.4f}, {lon:.4f}: pick a field paint and zoom in "
-                 f"(camera z{_field_floor(_vsd(HOLD.get('vs'))):.1f})")
+            _say(f"no fields on at {lat:.4f}, {lon:.4f}: the fields need a paint, camera "
+                 f"z{_field_floor(_vsd(HOLD.get('vs'))):.1f}, and (under CDL) fields only")
             return
         if int(p.get("gen", -1)) != HOLD["fgen"]:
             return   # a click on the previous table
@@ -3146,8 +3182,8 @@ def _(
     if _act == "analyze":
         ft = HOLD["ft"]
         _set_panel(_analyze_html(ft) if ft is not None and _paint is not None and _cfg_get("fields_on")
-                   else f"<span style='opacity:.7'>no fields in view (pick a field paint and zoom in, "
-                        f"camera z{_field_floor(_vsd(HOLD.get('vs'))):.1f})</span>")
+                   else f"<span style='opacity:.7'>no fields in view (the fields need a paint, camera "
+                        f"z{_field_floor(_vsd(HOLD.get('vs'))):.1f}, and under CDL the <i>fields only</i> box)</span>")
     if _act == "search" and _q:
         _say(f"searching: {_q}")
         HOLD["stask"] = _spawn(_search(_q))
@@ -3172,13 +3208,20 @@ def _(
             else:
                 _kick()
                 _recolor()
+        elif _was.get("polys") != _polys:
+            # "fields only" toggled: to the polygons, or back to the raw raster
+            if _polys:
+                _kick()
+            else:
+                _fields_off()
         elif _paint is not None and HOLD["ft"] is not None:
             if (_was["inv"], _was["sel"]) != (_inv, _sel):
                 _recolor()
                 _set_panel(_panel(HOLD["ft"]))
             if _was["outlines"] != _outlines:
                 _cfg(outlines=_outlines)
-    _sync_crops(json.loads(deck.config or "{}"))
+    _vs_now = _vsd(HOLD.get("vs"))
+    _sync_tier(_vs_now["zoom"] >= _field_floor(_vs_now))
     return
 
 

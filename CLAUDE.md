@@ -210,6 +210,48 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   drawn at all (`rasterOn` in the JS), so with a paint up the CDL raster
   switch has no visible effect until you drop the paint. Raise it for a
   backdrop, 1 for the old full strength.
+- ONE SELECTOR, THE CDL BUTTON IS THE CDL (Stephen, 2026-08-26, after the
+  backdrop went back: "the second cdl button is what we're going to use and get
+  rid of cdl raster, cdl starts default on and kicks in when zoomed out like it
+  does already, and crops only only appears when cdl is selected. we're not
+  going to auto switch to color by agreement that has to manually be clicked",
+  then "Just keep the CDL and if it's crops only, it will be that. And then just
+  kind of indicate to the user that once they're zoomed in enough, they can click
+  the other options", "i think once we pass a certain zoom we should mask the
+  boundaries", "but they can uncheck?" -> yes, "fields only"). The panel is now
+  ONE exclusive group with each paint's modifiers beside it:
+  `year | [CDL] crops only fields only | [color by agreement] highlight
+  disagreement | [AlphaEarth suggests] | field boundaries | caret`.
+  - The "CDL raster" CHECKBOX IS GONE. The CDL button is the CDL at whatever
+    tier the camera is in: the raster below `_field_floor()`, the fields as
+    polygons above it. Nothing can be checked-and-invisible any more, which was
+    the whole complaint.
+  - CDL IS THE DEFAULT PAINT (kernel and strip), not viridis. Nothing ever
+    auto-selects color by agreement.
+  - `crops only` shows only while CDL is lit (pure client-side, `stylePaint`);
+    the `rasteron` trait and `_sync_crops` are gone with it.
+  - `fields only` (ctl key `mask`, default on) is CDL's second modifier and
+    shows only from the field tier, which the kernel says through the widget
+    trait `fieldtier` (set in `_serve_fields`, so it follows the camera, and
+    once more at the end of the wiring run). ON = the polygons (masked by BEING
+    polygons). OFF = the raw CDL raster at every zoom, no polygons, no pick.
+    It cannot apply to the other paints: they are per-field values.
+  - `field outlines` is renamed `field boundaries` and DEFAULTS OFF. It is the
+    silver lines and nothing else, never the mask.
+  - Below the floor the raster draws whatever is selected, and the map note is
+    the indication he asked for: "this is the CDL raster · the fields and the
+    other paints need camera z11.4" (CDL) or "... color by agreement needs
+    camera z11.4".
+  - Kernel: `_polys = _paint is not None and not (_paint == "cdl" and not
+    _mask)` (the polygons are the picture from the tier) and `_raster = _paint
+    is not None`; both are in `_rstate`, and `_serve_batch` now does
+    `raster = raster and not (tier and polys)`, i.e. THE RASTER SERVES BLANKS AT
+    THE FIELD TIER while the polygons are coming. That is his judder TODO
+    ("should just render as agreement") taken the way he wrote it; the cost is a
+    basemap-only moment during the fold instead of CDL colors flashing first.
+  - `_rings_on = _outlines and not _polys`: the PIL polylines carry the
+    boundaries whenever the polygons are not up (no paint, or CDL unmasked),
+    the PathLayer when they are.
 - THE BACKDROP WAS TRIED AND REVERTED (2026-08-26, a4f31fb reverted). `raster_dim`
   0.3 under a paint, to make the CDL raster switch mean something instead of
   sitting checked and invisible. His shot of it (Delta, camera z13, crops only +
