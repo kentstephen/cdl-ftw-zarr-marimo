@@ -1891,9 +1891,19 @@ def _(anywidget, traitlets):
             mkPaint("suggests", "AlphaEarth suggests", "every field in the CDL color of the crop AlphaEarth puts it closest to, relative to this view: its own where AlphaEarth backs it, another crop's where it does not; grey where AlphaEarth has no prototype for its crop (from camera z11); click again to hide"),
           ];
           const [invLab, inv] = mkChk("highlight disagreement", "color by agreement: reverse the ramp (bright = disagrees)", has("inv") ? !!last.inv : false, () => send("set"));
-          const stylePaint = () => { paintBtns.forEach(([k, b]) => onCss(b, k === paint)); };
+          // it modifies ONE paint, so it sits with that paint and exists only
+          // while it is on: no carry-over to CDL or to suggests (Stephen,
+          // 2026-08-26: "highlight disagreement should not carry over to cdl.
+          // the selection ... should be next to color by agreement")
+          const stylePaint = () => {
+            paintBtns.forEach(([k, b]) => onCss(b, k === paint));
+            invLab.style.display = paint === "viridis" ? "inline-flex" : "none";
+            if (paint !== "viridis") inv.checked = false;
+          };
           stylePaint();
-          paintBox.append(pl, ...paintBtns.map(([, b]) => b), invLab);
+          const paintKids = [pl];
+          paintBtns.forEach(([k, b]) => { paintKids.push(b); if (k === "viridis") paintKids.push(invLab); });
+          paintBox.append(...paintKids);
           const legendBox = document.createElement("div");
           legendBox.style.cssText =
             "display:flex;flex-wrap:wrap;align-items:center;" +
@@ -1988,7 +1998,8 @@ def _(anywidget, traitlets):
           expB.className = "maplibregl-ctrl";   // the map's pick handler skips its controls
           expB.style.cssText =
             sqCss + ";position:absolute;right:8px;bottom:52px;z-index:6;display:none;" +
-            "background:rgba(0,0,0,.35);color:#fff;border-color:rgba(255,255,255,.5);opacity:.9";
+            "background:#fff;color:#222;border-color:rgba(0,0,0,.2);opacity:1;" +
+            "box-shadow:0 0 0 2px rgba(0,0,0,.1)";
           // the expand arrow belongs to the MAP, just above the Carto credit. The
           // map is another widget and may not be in the DOM yet, so poll briefly
           // for its container; failing that, the page's bottom right corner.
@@ -2026,7 +2037,7 @@ def _(anywidget, traitlets):
           expB.onclick = () => setOpen(true);
           [colB, expB].forEach((b) => {
             b.onmouseenter = () => { b.style.opacity = "1"; };
-            b.onmouseleave = () => { b.style.opacity = b === expB ? ".9" : ".6"; };
+            b.onmouseleave = () => { b.style.opacity = b === expB ? "1" : ".6"; };
           });
           // ROW ONE is year + the layer switches + the paints, with the collapse
           // button hard right ON THAT LINE (Stephen, 2026-08-26); analyze and the
@@ -2438,13 +2449,14 @@ def _(anywidget, asyncio, traitlets):
             const was = cfg;
             try { cfg = JSON.parse(model.get("config") || "{}"); } catch (e) { cfg = {}; }
             if (cfg.height && cfg.height !== was.height && !document.fullscreenElement) mapEl.style.height = cfg.height + "px";
+            if (cfg.note !== was.note) say(cfg.note || "");
             update();
           });
           model.on("change:fields", () => { loadFields(); loadColors(); update(); });
           model.on("change:colors", () => { loadColors(); update(); });
           model.on("change:lines", () => { loadLines(); update(); });
           loadFields(); loadColors(); loadLines();
-          try { boot(); }
+          try { boot(); if (cfg.note) say(cfg.note); }
           catch (e) { say("boot: " + e.message); console.error(e); }
           return () => { try { map && map.remove(); } catch (e) {} };
         }
@@ -2576,7 +2588,7 @@ def _(
     # still threaded through the serve, so it is one line to bring back.
     _outlines = bool(_c.get("outlines", _c.get("fields", True)))
     _clip = False
-    _inv = bool(_c.get("inv", False))
+    _inv = bool(_c.get("inv", False)) and _paint == "viridis"   # it modifies that paint only
     _sel = tuple(sorted(int(v) for v in (_c.get("sel") or [])))
     _fyear = _year if _year in FTW_YEARS else FTW_YEARS[0]
     # an act is applied ONCE (a re-run of this cell for any other reason must
@@ -2869,9 +2881,12 @@ def _(
         _cfg(raster=_raster, outlines=_outlines, rgen=HOLD["rgen"])
 
     # ---- the fields: the table over the padded view, the polygons for it -----
-    def _fields_off(msg=None):
-        if _cfg_get("fields_on"):
-            _cfg(fields_on=False)
+    def _fields_off(msg=None, note=""):
+        """No polygons: the map falls back to the CDL raster, which with a paint
+        button lit reads as "color by agreement shows cdl fields" (Stephen,
+        2026-08-26). So say it IN the map, not only in the strip below it."""
+        if _cfg_get("fields_on") or _cfg_get("note", "") != note:
+            _cfg(fields_on=False, note=note)
         try:
             hud.widget.legend = "[]"
         except Exception:
@@ -2915,12 +2930,12 @@ def _(
             msg = f"zoom {z:.1f} · fields from camera z{floor:.1f} (zoom in)"
             if floor > FIELD_ZOOM:
                 msg += f" · {box_km2(box):,.0f} km² in view here, the fold caps at {FIELD_MAX_KM2:g}"
-            _fields_off(msg)
+            _fields_off(msg, note=f"this is the CDL raster · the field paint needs camera z{floor:.1f}")
             return
         if (not force and HOLD["ft"] is not None and HOLD["box"] is not None
                 and contains(HOLD["box"], view) and HOLD["ft"]["year"] == st["year"]):
             if not _cfg_get("fields_on"):
-                _cfg(fields_on=True, outlines=st["outlines"])
+                _cfg(fields_on=True, outlines=st["outlines"], note="")
                 _recolor()
                 _say(HOLD.get("last_status", ""))
             return
@@ -2944,7 +2959,7 @@ def _(
         deck.colors = b""
         deck.lines = lipc
         deck.fields = ipc
-        _cfg(fields_on=True, outlines=st["outlines"], fgen=HOLD["fgen"])
+        _cfg(fields_on=True, outlines=st["outlines"], note="", fgen=HOLD["fgen"])
         try:
             hud.widget.legend = json.dumps(legend_for(ft, st["paint"], st["inv"]))
         except Exception:

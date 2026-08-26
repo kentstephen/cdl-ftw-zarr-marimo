@@ -238,7 +238,14 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   `_raster_line`, the pick and analyze all speak that ONE number, and the
   separate area branch in `_serve_fields` is gone with it.
 - CROPS ONLY IS ON BY DEFAULT (Stephen, 2026-08-26), the kernel default and
-  the strip default both.
+  the strip default both. Knock-on he hit at once: with no polygons up
+  the map falls back to the CDL raster, and crops-only makes that read as
+  crop-colored FIELDS while a paint button is still lit ("you made a change,
+  which is confusing color by agreement shows cdl fields"). So `_fields_off`
+  now takes a `note` and pushes it through `cfg.note` to the map's own
+  top-left overlay ("this is the CDL raster · the field paint needs camera
+  zX"), cleared whenever the polygons come on. The strip's status line said it
+  already; nobody reads under the map.
 - SIMPLIFY FOR VIZ (Stephen, 2026-08-26: the boundaries "look like shit",
   "they're not straight lines", "looks like pixelation thing"). Measured over
   6 z13 tiles in the Delta: 17,142 outline segments, 100 % axis-aligned,
@@ -333,6 +340,26 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   for key" x2 appeared once on an earlier run-all with no visible effect).
   NOT yet run in Stephen's browser: his `uv run marimo edit cdl-aef-deck.py`
   kernel must be restarted to pick this up.
+- HIGHLIGHT DISAGREEMENT BELONGS TO ONE PAINT (Stephen, 2026-08-26: "the
+  logic of the control panel is fucked. highlight disagreement should not
+  carry over to cdl. the selection for highlight disagreement should be next
+  to color by agreement"). It now sits immediately after that button in the
+  row (`paintKids`, not appended past "AlphaEarth suggests"), `stylePaint()`
+  shows it only while that paint is on and unchecks it otherwise (hidden, not
+  greyed: his standing rule), and the kernel enforces the same at the source,
+  `_inv = ... and _paint == "viridis"`. Before, only the viridis branch of
+  `field_fill` read `inv` but the checkbox stayed checked across paint
+  switches, which is the carry-over he saw.
+- The expand arrow is a WHITE button (white fill, dark glyph, thin dark border
+  and a soft halo, full opacity), matching the Carto info control under it;
+  the earlier dark-fill/white-glyph version was "hard to see" on the map.
+- OPEN, his words, no direction chosen: "the crops only button is confusing".
+  Two readings were put to him and he did not pick: (1) it reads as a LAYER
+  sitting between "CDL raster" and "field outlines" when it is only a modifier
+  of the raster (the polygons are crop fields already), so nest and rename it;
+  (2) on Dark Matter it punches the non-crop classes to transparent, so
+  pasture, water and developed read as MISSING DATA rather than "not a crop",
+  so draw them as one muted tone instead. Do not guess: ask.
 - NOT VERIFIED IN A BROWSER (the whole 2026-08-26 set above: the suggests
   paint, the silver outlines, DP simplify, the three independent layers, the
   raster_dim rule, collapse/expand, `_field_floor`, crops-only default). What
