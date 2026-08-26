@@ -69,14 +69,10 @@ aef-mosaic; "The AlphaEarth Foundations Satellite Embedding dataset is
 produced by Google and Google DeepMind", CC-BY 4.0).
 
 Run from THIS repo's venv:  uv sync && uv run marimo edit cdl-aef-deck.py
-
-In the cloud, no install (molab: github.com -> molab.marimo.io/github, the
-branch in the path, so this link follows the branch and must be repointed at
-main when it merges; the inline deps above are the environment, every read is
-anonymous HTTPS, and the caches under $TMPDIR start empty, so every serve there
-is cold):
-
-  https://molab.marimo.io/github/kentstephen/cdl-ftw-zarr-marimo/blob/cdl-aef-deck/cdl-aef-deck.py
+In the cloud, nothing to install: the "Open in molab" badge in the first
+markdown cell (x-sql-marimo's badge cell by copy). It carries the BRANCH in its
+path, so repoint it at main when this merges; a fresh sandbox's $TMPDIR caches
+are empty, so every serve there is cold.
 """
 
 import marimo
@@ -151,6 +147,8 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    [![Open in molab](https://molab.marimo.io/molab-shield.svg)](https://molab.marimo.io/github/github.com/kentstephen/cdl-ftw-zarr-marimo/blob/cdl-aef-deck/cdl-aef-deck.py)
+
     # CDL, backed or not by AlphaEarth, on the Fields of the World
 
     Zoomed out: the **Cropland Data Layer** as a picture, at any zoom (the
@@ -169,9 +167,6 @@ def _(mo):
       AlphaEarth has no prototype for its crop.
 
     Click a field for its story; *analyze what's in view* for the per-crop table.
-
-    Run it in the cloud, nothing to install:
-    [open this notebook in molab](https://molab.marimo.io/github/kentstephen/cdl-ftw-zarr-marimo/blob/cdl-aef-deck/cdl-aef-deck.py).
 
     | leg | source | read |
     |---|---|---|

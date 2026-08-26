@@ -353,6 +353,19 @@ hold the full history; a copy of the FTW notes is in `docs/`.
 - The expand arrow is a WHITE button (white fill, dark glyph, thin dark border
   and a soft halo, full opacity), matching the Carto info control under it;
   the earlier dark-fill/white-glyph version was "hard to see" on the map.
+- THE MOLAB BADGE (Stephen, 2026-08-26: "its a button, there's examples of it in
+  this repo possibly and x sql marimo"). x-sql-marimo's house pattern, by copy:
+  `[![Open in molab](https://molab.marimo.io/molab-shield.svg)](URL)` as the FIRST
+  line of the first markdown cell (the cell right after the imports), never a bare
+  text link. The URL is that repo's shape too,
+  `molab.marimo.io/github/github.com/<owner>/<repo>/blob/<ref>/<file>`; the docs'
+  shorter form without the `github.com/` segment resolves to the same
+  raw.githubusercontent URL, and his form is the one he has actually run from
+  (xsql-hrrr-counties, molab, 2026-08-15). THE REF IS IN THE PATH: this file only
+  exists on the branch, so the badge points at `cdl-aef-deck` and must be repointed
+  at main on merge. molab gives 4 CPUs / 32 GB and 12 h (90 min idle), so the field
+  tier's ~1 GB AEF read fits; `CACHE_DIR` under $TMPDIR starts empty there, so every
+  serve is cold. Not run there yet.
 - CROPS ONLY BELONGS TO THE RASTER (Stephen, 2026-08-26: "a feature like color
   by disagreement agreement where crops only disapears when the raster is not
   being used ... its a conditional only when color by agreement is selected is
