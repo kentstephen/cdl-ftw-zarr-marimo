@@ -69,6 +69,14 @@ aef-mosaic; "The AlphaEarth Foundations Satellite Embedding dataset is
 produced by Google and Google DeepMind", CC-BY 4.0).
 
 Run from THIS repo's venv:  uv sync && uv run marimo edit cdl-aef-deck.py
+
+In the cloud, no install (molab: github.com -> molab.marimo.io/github, the
+branch in the path, so this link follows the branch and must be repointed at
+main when it merges; the inline deps above are the environment, every read is
+anonymous HTTPS, and the caches under $TMPDIR start empty, so every serve there
+is cold):
+
+  https://molab.marimo.io/github/kentstephen/cdl-ftw-zarr-marimo/blob/cdl-aef-deck/cdl-aef-deck.py
 """
 
 import marimo
@@ -161,6 +169,9 @@ def _(mo):
       AlphaEarth has no prototype for its crop.
 
     Click a field for its story; *analyze what's in view* for the per-crop table.
+
+    Run it in the cloud, nothing to install:
+    [open this notebook in molab](https://molab.marimo.io/github/kentstephen/cdl-ftw-zarr-marimo/blob/cdl-aef-deck/cdl-aef-deck.py).
 
     | leg | source | read |
     |---|---|---|
