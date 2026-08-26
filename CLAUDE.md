@@ -182,6 +182,72 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   (Stephen's three reports on it: load delay, fields clipped at batch seams,
   lost picking; the seam and the pick are structural there, see the plan);
   the first deck widget with two TileLayers b970d50..0693f27.
+- THREE INDEPENDENT LAYERS (Stephen, 2026-08-26: the controls are "a bit
+  wonky", "should be able to disable all layers"; "We can keep the polygons. I
+  just wanna get rid of the field outlines if I don't want them. I can just go
+  to the raster if I wanna look at that and filter for crops only. It's a
+  separate product."). The CDL raster (its own switch, crops-only its
+  modifier), the painted polygons (the paint buttons: none selected = none),
+  the field outlines (its own switch, ctl key `outlines`, was `fields`).
+  RETIRED with the one-switch design below: the raster's clip to P(field)
+  (`_clip = False`, still threaded through the serve, one line to bring back)
+  and the `under` config (the raster now draws under the polygons whenever its
+  own switch is on; the JS is `visible: cfg.raster !== false || (cfg.outlines
+  !== false && !fieldsOn)`). The outlines are drawn ONCE: the PathLayer when a
+  paint is up, the PIL polylines on the raster tiles when it is not, which is
+  `_rings_on = _outlines and _paint is None` inside `_rstate` (so toggling the
+  outlines under a paint costs no tile refetch). Every combination is now
+  reachable, including all-off (basemap only) and outlines with no raster.
+  A FIELD PAINT IS THE FIELDS ALONE (Stephen, 2026-08-26, on a shot of
+  crops-only CDL + the viridis paint + outlines: "what am i looking at ...
+  perceptually baffling", then "if we're looking at agreement we are only
+  looking at the intersecting data that is the cdl and the ae in the field
+  boundaries ... agreement is only fields for this use case subject to
+  change"). Three encodings at full strength in one frame (CDL class hues on
+  the raster pixels BETWEEN the fields, viridis on the fields, silver
+  boundaries) do not resolve. So `cfg.raster_dim` (map config, DEFAULT 0):
+  under the polygons the TileLayer draws at that opacity, and at 0 it is not
+  drawn at all (`rasterOn` in the JS), so with a paint up the CDL raster
+  switch has no visible effect until you drop the paint. Raise it for a
+  backdrop, 1 for the old full strength.
+- COLLAPSE / EXPAND (Stephen, 2026-08-26, after two rounds of placement: the
+  collapse caret "needs to be at the top right not in the middle ... on the
+  same line all the way over to the right as year and the other top params",
+  the strip "needs to disapear entirely", and the expand "arrow up should be
+  visible above the carto credit"). So: `topRow` (flex 1 1 100 %) holds year,
+  the layer switches and the paints with the caret at `margin-left:auto`, and
+  analyze and the legend wrap below it; collapse sets `wrap.style.display =
+  "none"` (the whole strip, not its parts) and `onFs` re-applies it after its
+  cssText rewrites. The expand arrow is appended INTO the map container
+  (`deepFind(".maplibregl-map")` across shadow roots, polled every 400 ms for
+  ~24 s because the map is another widget, then a fixed bottom-right corner
+  fallback), absolute at right 8 / bottom 52 px, which clears the Carto info
+  circle it first overlapped; a WHITE arrow (opacity .9, white border, faint
+  dark fill) so it reads on the dark basemap. It carries class
+  `maplibregl-ctrl` so the map's pointerup pick skips it. All client-side: no ctl, so no kernel run and no re-serve. The
+  stale-widget sweep takes it with `[data-aef-expand]`.
+- ONE ZOOM RULE FOR THE FIELDS, `_field_floor(vsd)` (Stephen, 2026-08-26:
+  "layers get uneselected like color by agreement for no noticable reason.
+  check the logic"). FIELD_ZOOM and FIELD_MAX_KM2 were two knobs that
+  disagreed: the padded box at camera z11 is 1,170 km2 on a 1400x700 canvas
+  (under the 1,500 cap) but 2,383 fullscreen at 2000x1000 and 3,965 at
+  2560x1300, so at his fullscreen z11 the paint stayed lit while the area cap
+  silently dropped the fields. `_field_floor` returns FIELD_ZOOM, or the zoom
+  where the padded box fits the cap when that is higher (the box quarters per
+  zoom step: `z + 0.5*log2(km2/cap)`, ceiled to 0.1); `_serve_fields`,
+  `_raster_line`, the pick and analyze all speak that ONE number, and the
+  separate area branch in `_serve_fields` is gone with it.
+- CROPS ONLY IS ON BY DEFAULT (Stephen, 2026-08-26), the kernel default and
+  the strip default both.
+- SIMPLIFY FOR VIZ (Stephen, 2026-08-26: the boundaries "look like shit",
+  "they're not straight lines", "looks like pixelation thing"). Measured over
+  6 z13 tiles in the Delta: 17,142 outline segments, 100 % axis-aligned,
+  median 10.3 m, i.e. FTW's 10 m raster vectorized into a staircase. So
+  `SIMPLIFY_M = 10.0` and Douglas-Peucker (`_dp`, iterative, both ends pinned;
+  `_dp_ring` for the closed rings) at MVT DECODE time in tile units
+  (`_eps_units` from the tile row's latitude), on the outline polylines and
+  the polygon rings alike, so it is one pass per tile and cached with it.
+  0 disables. NOT yet measured: the vertex reduction and the serve cost.
 - ONE FIELDS SWITCH (Stephen, 2026-08-25 evening: "just keep one button for
   field boundaries ... have it selected ... when you zoom in, it clips to
   the fields, but it can be unselected ... but that's only past z14,
@@ -232,7 +298,8 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   HOME_BOX for that vantage, roughly -121.95..-121.05, 37.75..38.35. He set
   FIELD_ZOOM = 11 himself; a camera-z11 view (~1,300 km2, ~1,700 padded) is
   ~1 GB of AEF cold and sits just above FIELD_MAX_KM2 1500 (2,000 lets it
-  through; offered, not done). Do not conflate the two again.
+  through; offered, not done). Do not conflate the two again. RESOLVED
+  2026-08-26 by `_field_floor()` below: the two knobs no longer disagree.
 - PLAN LOGGED (2026-08-25 night, not built): `docs/wide-prototypes-plan.md`,
   prototypes fitted ONCE at the raster tier from a one-in-nine sample of the
   AEF chunks under the wide view (the CDL is already in hand there), held in
@@ -266,6 +333,16 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   for key" x2 appeared once on an earlier run-all with no visible effect).
   NOT yet run in Stephen's browser: his `uv run marimo edit cdl-aef-deck.py`
   kernel must be restarted to pick this up.
+- NOT VERIFIED IN A BROWSER (the whole 2026-08-26 set above: the suggests
+  paint, the silver outlines, DP simplify, the three independent layers, the
+  raster_dim rule, collapse/expand, `_field_floor`, crops-only default). What
+  WAS checked: the file parses, both `_esm` modules pass `node --check`, the
+  suggests paint and the outline geometry were measured headless (`app.run()`
+  from a scratch copy, then `ftw_tile_rings` / `field_table` directly), and an
+  earlier playwright pass covered the suggests paint and the silver outlines
+  only. Stephen's own kernel needs a restart to pick any of it up. He asked
+  NOT to spin up a headless notebook for small changes ("you dont have to
+  start a headless notebook for these kinds of changes").
 - TODO (Stephen, 2026-08-25 night, not now): on a zoom in with the fields
   switch on, the fields JUDDER from CDL colors to the agreement paint: the
   clipped CDL raster tiles (the raster tier at the new tile zoom) show first,
@@ -300,6 +377,37 @@ hold the full history; a copy of the FTW notes is in `docs/`.
   the alpha "agreement" paint stays commented out; no greyed-out buttons;
   gold outline not a white fill; color not colour; the strip initialises
   from the kernel's last ctl.
+- "ALPHAEARTH SUGGESTS" IS NOW A CROP MAP (Stephen, 2026-08-26: "the palette
+  should be what the CDL is, except it can be a null color if it doesn't have
+  that. And it looks like it's all null now"). It used to color ONLY the
+  disagreeing fields (the runner-up crop) and paint every agreeing field flat
+  grey, so a view where AEF mostly agrees read as all-null. Now `aef_best(ft)`
+  gives every field the crop AEF puts it closest to (its own where agreement
+  >= 0.5, the runner-up where not, -1 where the field sits out or its crop has
+  no prototype in view) and the paint is `CLASS_RGB[best]` at ALPHA_FLAT, the
+  null grey only where best < 0. The legend lists the suggested crops with
+  "N against CDL" per crop and a "no suggestion" row; the legend isolate and
+  the selection panel key off the same array. NOT touched: the CDL palette
+  itself, which is the store's own colors except three protan remaps (Cotton
+  #FF2525, Apples #B9004F, Dbl Crop Lettuce/Cotton), so grapes are #6F4488.
+  Measured over the Delta box at camera z12.6: 860 kept fields, 756 colored
+  (657 their own crop, 99 another), 104 null; at z13 in the browser 2,765
+  fields, 131 "no suggestion".
+- Note for later, not changed: the CDL palette gives Cucumbers, Garlic,
+  Cauliflower, Cabbage, Lettuce, Carrots, Broccoli and Watermelons the SAME
+  hex #FF6666, which is both indistinguishable between them and red (it clears
+  the protan remap only because g = 102 > the 100 cutoff).
+- The field OUTLINE is CLASSIC SILVER (192, 192, 192, 235), Stephen
+  2026-08-26; it was near-black (40, 40, 40, 200), then briefly a cool
+  (206, 210, 216) that read as grey to him. One constant kernel-side (the PIL
+  polylines on the clipped raster tiles) and one in the widget JS (the
+  PathLayer over the polygons); both must move together.
+- THE BASEMAP IS CARTO DARK MATTER (Stephen changed it himself in the JS,
+  2026-08-26); it was Positron. Dark Matter carries `watername_ocean`, so
+  LABELS_SLOT and the JS `before()` slot are unchanged and the deck layers
+  still draw under the labels. Knock-on flagged, not changed: the null grey
+  QUIET (150, 150, 150) at alpha 45 was tuned against near-white and is
+  nearly invisible on dark.
 
 ## Open
 

@@ -37,8 +37,9 @@ paint on), the unit becomes THE FIELD:
      relative to the crops in THIS view, not a classification.
   4. Paints, one at a time: CDL (each field its majority crop's color);
      color by agreement (viridis, BRIGHT = agrees, dark = a lead);
-     AlphaEarth suggests (a disagreeing field takes the runner-up crop's
-     color, agreeing fields go quiet). Highlight disagreement reverses the
+     AlphaEarth suggests (every field in the CDL color of the crop AEF puts
+     it closest to, grey where AEF has no prototype for its crop). Highlight
+     disagreement reverses the
      ramp. (An "agreement" paint, CDL color with alpha by agreement, is
      commented out in the strip: near-binary scores made it read as plain
      CDL; the code path stays in field_fill.) The CDL raster does not draw
@@ -154,9 +155,10 @@ def _(mo):
 
     - **CDL** paint: each field its majority crop's color.
     - **color by agreement** paint: viridis on the agreement (bright = agrees, dark = a lead).
-    - **AlphaEarth suggests** paint: a disagreeing field takes the color of the
-      crop AlphaEarth puts it closest to (relative to this view); agreeing fields
-      go quiet grey.
+    - **AlphaEarth suggests** paint: every field in the CDL color of the crop
+      AlphaEarth puts it closest to (relative to this view): its own where
+      AlphaEarth backs it, another crop's where it does not. Grey where
+      AlphaEarth has no prototype for its crop.
 
     Click a field for its story; *analyze what's in view* for the per-crop table.
 
@@ -231,8 +233,16 @@ def _(math, os, tempfile):
     FIELD_TILE_Z = int(round(FIELD_ZOOM)) + 1   # the tile zoom of camera FIELD_ZOOM (256-px tiles): the raster's clip
     #                                             and outlines apply from here, nothing field-related below
     SETTLE = 0.35             # seconds the camera must rest before a field serve
-    LABELS_SLOT = "watername_ocean"   # the Positron style layer the deck layers draw under
+    LABELS_SLOT = "watername_ocean"   # the basemap style layer the deck layers draw under
+    #                                   (Positron and Dark Matter both carry it)
     MIN_FIELD_PX = 12         # ~0.3 ac at 10 m: smaller components sit out
+    # FTW's polygons are its 10 m raster vectorized, so every boundary is a
+    # staircase of 10 m steps (measured: 100 % of the outline segments are
+    # axis-aligned, median 10.3 m) and zoomed in the fields read as jagged.
+    # Douglas-Peucker for the VIZ, in tile units at decode time (cached with
+    # the tile, so it costs one pass per tile): a straight edge comes back a
+    # straight line, real curvature stays. 0 disables. Stephen, 2026-08-26.
+    SIMPLIFY_M = 10.0
     MIN_CROP_FRAC = 0.3       # a field is a CROP field if >= this much is a crop class
     MIN_CLASS_FIELDS = 20     # a crop needs this many fields in view for a prototype
     TAU = 0.05                # the sigmoid's scale on the cosine margin (0.02 on hexagon
@@ -251,7 +261,7 @@ def _(math, os, tempfile):
         "viridis": "440154470d6048186a482374472e7c4538824241863e4a893a548c365d8d32658e2e6d8e2b758e287d8e25848e228c8d1f948c1e9c8920a38625ab822eb37c3aba7648c16e58c7656ccd5a7fd34e93d741a8db34c0df25d5e21aeae51afde725",
         "cividis": "00224e00285b002e6a0533711c396f293f6e33446d3c4a6c45506c4d556c555b6d5c616e6467706b6d72727274787877807f78888578908b78979177a09875a89e73b0a571b9ab6dc2b369cbb965d3c05fdcc859e6d051efd748f8df3cfee838",
     }
-    OUTLINE = (40, 40, 40, 200)
+    OUTLINE = (192, 192, 192, 255)   # classic silver, full alpha (Stephen, 2026-08-26)
 
     VIEW_W, VIEW_H = 1400, 700
     EXTENT = [-125.0, 24.0, -66.5, 49.8]
@@ -317,6 +327,7 @@ def _(math, os, tempfile):
         RAMPS,
         SC_BUCKET,
         SETTLE,
+        SIMPLIFY_M,
         TAU,
         TILE_CACHE,
         TILE_PX,
@@ -546,6 +557,7 @@ def _(
     FTW_VEC,
     S3Store,
     SC_BUCKET,
+    SIMPLIFY_M,
     ThreadPoolExecutor,
     gzip,
     math,
@@ -718,6 +730,52 @@ def _(
                 raise ValueError(f"geometry op {op}")
         return rings
 
+    def _eps_units(z, y, extent):
+        """SIMPLIFY_M in this tile's own units (MVT integers): the tile row's
+        centre latitude gives the ground metres per unit. 0 = no simplify."""
+        if SIMPLIFY_M <= 0:
+            return 0.0
+        n = 1 << z
+        lat = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * (y + 0.5) / n))))
+        m_per_unit = 40075016.686 * math.cos(math.radians(lat)) / (n * extent)
+        return SIMPLIFY_M / max(m_per_unit, 1e-9)
+
+    def _dp(a, eps):
+        """Douglas-Peucker on an (n, 2) array with both ends pinned, iterative
+        (the recursive form goes deep on a 10 m staircase)."""
+        n = len(a)
+        if eps <= 0 or n < 3:
+            return a
+        keep = np.zeros(n, dtype=bool)
+        keep[0] = keep[n - 1] = True
+        e2, stack = eps * eps, [(0, n - 1)]
+        while stack:
+            i, j = stack.pop()
+            if j <= i + 1:
+                continue
+            p, d = a[i], a[j] - a[i]
+            seg = a[i + 1:j] - p
+            L2 = float(d[0] * d[0] + d[1] * d[1])
+            if L2 <= 0.0:
+                dist2 = seg[:, 0] ** 2 + seg[:, 1] ** 2
+            else:
+                t = np.clip((seg @ d) / L2, 0.0, 1.0)
+                off = seg - t[:, None] * d
+                dist2 = off[:, 0] ** 2 + off[:, 1] ** 2
+            k = int(dist2.argmax())
+            if dist2[k] > e2:
+                m = i + 1 + k
+                keep[m] = True
+                stack.append((i, m))
+                stack.append((m, j))
+        return a[keep]
+
+    def _dp_ring(a, eps):
+        """_dp on a CLOSED ring (the first point repeated last, so it stays
+        closed); None if too little is left to fill."""
+        b = _dp(a, eps)
+        return b if len(b) >= 4 else None
+
     def _decode(blob, year, z, x, y):
         if blob[:2] == b"\x1f\x8b":
             blob = gzip.decompress(blob)
@@ -757,8 +815,11 @@ def _(
                     if not len(idx):
                         continue
                     cuts = np.flatnonzero(np.diff(idx) > 1) + 1
+                    eps = _eps_units(z, y, extent)
                     for run in np.split(idx, cuts):
-                        pts = a[run[0]:run[-1] + 2]
+                        pts = _dp(a[run[0]:run[-1] + 2], eps)
+                        if len(pts) < 2:
+                            continue
                         lon = (x + pts[:, 0] / extent) / n * 360.0 - 180.0
                         lat = np.degrees(np.arctan(np.sinh(np.pi * (1.0 - 2.0 * (y + pts[:, 1] / extent) / n))))
                         out.append(np.column_stack([lon, lat]))
@@ -875,6 +936,8 @@ def _(
                     if area == 0.0:
                         continue
                     a = _clip_ring(a, extent)
+                    if a is not None:
+                        a = _dp_ring(a, _eps_units(z, y, extent))
                     if a is None:
                         if area > 0:
                             poly = None   # an exterior wholly in the buffer: its holes go too
@@ -1559,6 +1622,15 @@ def _(
 ):
     # ---- the field paints: one rgba LUT by field id; the polygons keyed to
     # the field ids and shipped as Arrow
+    def aef_best(ft):
+        """The crop AlphaEarth puts each field closest to: the field's own CDL
+        crop where AlphaEarth backs it (agreement >= 0.5), the runner-up crop
+        where it does not, and -1 where AlphaEarth has nothing to say (the
+        field sits out, or its crop has no prototype in this view)."""
+        maj, alt, agree, kept, scored = ft["maj"], ft["alt"], ft["agree"], ft["kept"], ft["scored"]
+        best = np.where(np.nan_to_num(agree, nan=1.0) < 0.5, alt, maj.astype(np.int64))
+        return np.where(kept & scored & (best >= 0), best, -1).astype(np.int64)
+
     def field_fill(ft, paint, sel, inv=False):
         """(nlab+1, 4) uint8 rgba by field id for a paint (cdl, agreement,
         viridis, suggests). Fields that sit out (tiny, non-crop, no embedding)
@@ -1587,14 +1659,13 @@ def _(
             al = np.where(scored, al, ALPHA_MIN if inv else ALPHA_MAX).astype(np.uint8)
             rgba[kept, 3] = al[kept]
             key = maj.astype(np.int64)
-        else:  # "suggests": the runner-up crop's color where AEF disagrees
-            dis = scored & (agree < 0.5) & (alt >= 0)
-            quiet = kept & ~dis
-            rgba[quiet, :3] = QUIET
-            rgba[quiet, 3] = np.where(scored[quiet], 90, 45)
-            rgba[dis, :3] = CLASS_RGB[alt[dis]]
-            rgba[dis, 3] = ALPHA_FLAT
-            key = alt
+        else:  # "suggests": every field in the CDL color of the crop AEF puts
+            # it closest to (its own where AEF backs it, the runner-up where it
+            # does not); a field AEF cannot speak to keeps the null grey
+            key = aef_best(ft)
+            has = key >= 0
+            rgba[has, :3] = CLASS_RGB[key[has]]
+            rgba[has, 3] = ALPHA_FLAT
         if sel:
             keep = np.isin(key, list(sel))
             rgba[kept & ~keep, 3] = DIM_ALPHA
@@ -1608,12 +1679,22 @@ def _(
             items.append({"ramp": RAMP_HEX, "cmap": "viridis",
                           "lo": "agrees" if inv else "disagrees", "hi": "disagrees" if inv else "agrees"})
         if paint == "suggests":
-            dis = scored & (agree < 0.5) & (alt >= 0)
-            tot = max(1, int(dis.sum()))
-            codes, nn = np.unique(alt[dis], return_counts=True)
+            best = aef_best(ft)
+            has = best >= 0
+            tot = max(1, int(has.sum()))
+            codes, nn = np.unique(best[has], return_counts=True)
             for code, cnt in sorted(zip(codes, nn), key=lambda t: -t[1]):
+                if int(code) not in CLASSES:
+                    continue
+                vs = int((has & (best == code) & (maj != code)).sum())
                 items.append({"code": int(code), "name": cname(code), "hex": CLASSES[int(code)][1],
-                              "pct": round(100 * int(cnt) / tot, 1), "p50": "", "note": f"{int(cnt):,}"})
+                              "pct": round(100 * int(cnt) / tot, 1), "p50": "",
+                              "note": f"{int(cnt):,}" + (f" · {vs:,} against CDL" if vs else "")})
+            null = int((kept & ~has).sum())
+            if null:
+                items.append({"code": -1, "name": "no suggestion", "hex": "#%02x%02x%02x" % QUIET,
+                              "pct": round(100 * null / max(1, int(kept.sum())), 1), "p50": "",
+                              "note": f"{null:,} of {int(kept.sum()):,} fields"})
             return items
         tot = max(1, int(kept.sum()))
         codes, nn = np.unique(maj[kept], return_counts=True)
@@ -1704,7 +1785,7 @@ def _(
             w.write_table(tbl)
         return sink.getvalue()
 
-    return field_fill, legend_for, lines_ipc, poly_fids, polys_ipc
+    return aef_best, field_fill, legend_for, lines_ipc, poly_fids, polys_ipc
 
 
 @app.cell
@@ -1712,13 +1793,14 @@ def _(anywidget, traitlets):
     class HudControls(anywidget.AnyWidget):
         """The strip under the map (aef-agreement.py's skeleton: the fullscreen
         dock; the click is the map widget's own now) with this
-        notebook's controls: year, the raster switches (CDL raster, crops only),
-        the one FIELDS switch (Stephen, 2026-08-25: "just keep one button for
-        field boundaries ... have it selected ... it clips to the fields, but
-        it can be unselected": on = clip + outlines, off = the raw CDL, also
-        under the painted fields), the field paint (CDL / color by agreement /
-        AlphaEarth suggests, one at a time or none), highlight disagreement,
-        analyze, refresh, search, the pickable legend; panel and status lines.
+        notebook's controls, THREE INDEPENDENT LAYERS (Stephen, 2026-08-26:
+        "should be able to disable all layers"): the CDL raster (its switch,
+        crops only its modifier), the painted polygons (the paint buttons:
+        CDL / color by agreement / AlphaEarth suggests, one at a time, click
+        again for none), the field outlines (its own switch, no longer the
+        raster's clip). Plus highlight disagreement, analyze, refresh, search,
+        the pickable legend, panel and status lines, and the collapse button
+        (top right; the expand button sits at the screen's bottom right).
         Every commit re-runs the wiring cell (marimo), where the acts happen
         IN the cell run."""
 
@@ -1751,14 +1833,15 @@ def _(anywidget, traitlets):
           const has = (k) => Object.prototype.hasOwnProperty.call(last, k);
           let paint = has("paint") ? last.paint : "viridis";
           let raster = has("raster") ? !!last.raster : true;
-          let crops = has("crops") ? !!last.crops : false;
-          let fieldsOn = has("fields") ? !!last.fields : true;
+          let crops = has("crops") ? !!last.crops : true;
+          let outlinesOn = has("outlines") ? !!last.outlines : (has("fields") ? !!last.fields : true);
+          let open = true;
           const sel = new Set(Array.isArray(last.sel) ? last.sel : []);
           let seq = has("n") ? (last.n | 0) : 0;
           const send = (act, extra) => {
             model.set("ctl", JSON.stringify(Object.assign({
               act: act, paint: paint, sel: Array.from(sel), inv: inv.checked,
-              raster: raster, crops: crops, fields: fieldsOn,
+              raster: raster, crops: crops, outlines: outlinesOn,
               year: parseInt(yearSel.value, 10), n: ++seq }, extra || {})));
             model.save_changes();
           };
@@ -1787,7 +1870,7 @@ def _(anywidget, traitlets):
           rasterBox.style.cssText = "display:inline-flex;gap:.6rem;align-items:center";
           const [rasLab] = mkChk("CDL raster", "the Cropland Data Layer as tiles, at any zoom (not under the fields)", raster, (v) => { raster = v; send("set"); });
           const [cropLab] = mkChk("crops only", "raster: drop the non-crop classes", crops, (v) => { crops = v; send("set"); });
-          const [fldLab] = mkChk("fields", "the Fields of the World: the raster clipped to P(field) >= 0.5 and the field outlines drawn; off = the raw CDL everywhere, and under the painted fields", fieldsOn, (v) => { fieldsOn = v; send("set"); });
+          const [fldLab] = mkChk("field outlines", "the Fields of the World boundaries as silver lines (from camera z11); independent of the raster and of the paint", outlinesOn, (v) => { outlinesOn = v; send("set"); });
           rasterBox.append(rasLab, cropLab, fldLab);
           const paintBox = document.createElement("span");
           paintBox.style.cssText = "display:inline-flex;gap:.3rem;align-items:center";
@@ -1800,12 +1883,12 @@ def _(anywidget, traitlets):
             return [key, b];
           };
           const paintBtns = [
-            mkPaint("cdl", "CDL", "each field its CDL majority crop's color (from camera z12); click again to hide"),
+            mkPaint("cdl", "CDL", "each field its CDL majority crop's color (from camera z11); click again to hide"),
             // "agreement" (CDL color, alpha by agreement) is OUT for now (Stephen,
             // 2026-08-25: near-binary scores made it read as plain CDL):
             // mkPaint("agreement", "agreement", "the CDL color, alpha follows how well AlphaEarth backs the crop; click again to hide"),
-            mkPaint("viridis", "color by agreement", "viridis on the agreement value: bright = agrees, dark = a lead (from camera z12); highlight disagreement reverses; click again to hide"),
-            mkPaint("suggests", "AlphaEarth suggests", "a disagreeing field takes the color of the crop AlphaEarth puts it closest to, relative to this view; agreeing fields go quiet (from camera z12); click again to hide"),
+            mkPaint("viridis", "color by agreement", "viridis on the agreement value: bright = agrees, dark = a lead (from camera z11); highlight disagreement reverses; click again to hide"),
+            mkPaint("suggests", "AlphaEarth suggests", "every field in the CDL color of the crop AlphaEarth puts it closest to, relative to this view: its own where AlphaEarth backs it, another crop's where it does not; grey where AlphaEarth has no prototype for its crop (from camera z11); click again to hide"),
           ];
           const [invLab, inv] = mkChk("highlight disagreement", "color by agreement: reverse the ramp (bright = disagrees)", has("inv") ? !!last.inv : false, () => send("set"));
           const stylePaint = () => { paintBtns.forEach(([k, b]) => onCss(b, k === paint)); };
@@ -1890,7 +1973,69 @@ def _(anywidget, traitlets):
             if (e.key === "Enter" && q) { e.preventDefault(); send("search", { q: q }); }
           });
           anBox.append(anB, clB, rfB, search);
-          box.append(yearBox, rasterBox, paintBox, anBox, legendBox);
+          // collapse (top right of the strip) / expand (bottom right of the
+          // screen). Client-side only: no ctl, so no kernel run and no re-serve.
+          const sqCss =
+            "font:12px ui-sans-serif,system-ui,sans-serif;cursor:pointer;" +
+            "width:1.5rem;height:1.5rem;line-height:1;padding:0;border-radius:5px;" +
+            "border:1px solid rgba(127,127,127,.45);color:inherit;opacity:.6";
+          const colB = document.createElement("button");
+          colB.textContent = "\u25be"; colB.title = "hide the controls";
+          colB.style.cssText = sqCss + ";margin-left:auto;flex:0 0 auto;background:transparent";
+          const expB = document.createElement("button");
+          expB.textContent = "\u25b4"; expB.title = "show the controls";
+          expB.dataset.aefExpand = "1";
+          expB.className = "maplibregl-ctrl";   // the map's pick handler skips its controls
+          expB.style.cssText =
+            sqCss + ";position:absolute;right:8px;bottom:52px;z-index:6;display:none;" +
+            "background:rgba(0,0,0,.35);color:#fff;border-color:rgba(255,255,255,.5);opacity:.9";
+          // the expand arrow belongs to the MAP, just above the Carto credit. The
+          // map is another widget and may not be in the DOM yet, so poll briefly
+          // for its container; failing that, the page's bottom right corner.
+          const deepFind = (sel) => {
+            const walk = (r) => {
+              for (const n of r.querySelectorAll("*")) {
+                if (n.matches && n.matches(sel)) return n;
+                if (n.shadowRoot) { const h = walk(n.shadowRoot); if (h) return h; }
+              }
+              return null;
+            };
+            return walk(document);
+          };
+          let tries = 0;
+          const dock = () => {
+            const m = deepFind(".maplibregl-map");
+            if (m) { m.appendChild(expB); return true; }
+            if (++tries > 60) {
+              expB.style.position = "fixed";
+              expB.style.right = ".9rem";
+              expB.style.bottom = ".9rem";
+              expB.style.zIndex = "60";
+              document.body.appendChild(expB);
+              return true;
+            }
+            return false;
+          };
+          if (!dock()) { const iv = setInterval(() => { if (dock()) clearInterval(iv); }, 400); }
+          const setOpen = (v) => {
+            open = v;
+            wrap.style.display = v ? "" : "none";   // the strip goes entirely
+            expB.style.display = v ? "none" : "block";
+          };
+          colB.onclick = () => setOpen(false);
+          expB.onclick = () => setOpen(true);
+          [colB, expB].forEach((b) => {
+            b.onmouseenter = () => { b.style.opacity = "1"; };
+            b.onmouseleave = () => { b.style.opacity = b === expB ? ".9" : ".6"; };
+          });
+          // ROW ONE is year + the layer switches + the paints, with the collapse
+          // button hard right ON THAT LINE (Stephen, 2026-08-26); analyze and the
+          // legend wrap below it.
+          const topRow = document.createElement("div");
+          topRow.style.cssText =
+            "display:flex;flex-wrap:wrap;align-items:center;gap:.6rem 1rem;flex:1 1 100%";
+          topRow.append(yearBox, rasterBox, paintBox, colB);
+          box.append(topRow, anBox, legendBox);
           const panel = document.createElement("div");
           panel.style.cssText = "font:13.5px ui-sans-serif,system-ui,sans-serif;padding:.25rem 0";
           const status = document.createElement("div");
@@ -1906,10 +2051,14 @@ def _(anywidget, traitlets):
             root.querySelectorAll("[data-aef-strip]").forEach((w) => {
               if (w !== wrap) { w.dataset.dead = "1"; w.remove(); }
             });
+            root.querySelectorAll("[data-aef-expand]").forEach((b) => {
+              if (b !== expB) b.remove();
+            });
             root.querySelectorAll("*").forEach((n) => { if (n.shadowRoot) killOld(n.shadowRoot); });
           };
           killOld(document);
           el.appendChild(wrap);
+          setOpen(open);
           const realFs = () => {
             let fe = document.fullscreenElement;
             while (fe && fe.shadowRoot && fe.shadowRoot.fullscreenElement)
@@ -1934,6 +2083,7 @@ def _(anywidget, traitlets):
               wrap.style.cssText = "width:100%;box-sizing:border-box";
               el.appendChild(wrap);
             }
+            setOpen(open);   // the cssText rewrites above drop a collapsed strip's display
           };
           document.addEventListener("fullscreenchange", onFs);
           const paintS = () => { status.textContent = model.get("status") || ""; };
@@ -1945,6 +2095,7 @@ def _(anywidget, traitlets):
           return () => {
             document.removeEventListener("fullscreenchange", onFs);
             wrap.remove();
+            expB.remove();
           };
         }
         export default { render };
@@ -2019,8 +2170,8 @@ def _(anywidget, asyncio, traitlets):
         import {GeoArrowPolygonLayer} from "https://esm.sh/@geoarrow/deck.gl-layers@0.3.2?deps=@deck.gl/aggregation-layers@9.3.10,@deck.gl/core@9.3.10,@deck.gl/extensions@9.3.10,@deck.gl/geo-layers@9.3.10,@deck.gl/layers@9.3.10,@deck.gl/mesh-layers@9.3.10,apache-arrow@18.1.0";
         import * as arrow from "https://esm.sh/apache-arrow@18.1.0";
 
-        const STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
-        const OUTLINE = [40, 40, 40, 200];
+        const STYLE = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
+        const OUTLINE = [192, 192, 192, 255];
         const GOLD = [255, 200, 40, 255];
 
         function bytesOf(v) {
@@ -2158,16 +2309,26 @@ def _(anywidget, asyncio, traitlets):
           function layers() {
             const out = [];
             const fieldsOn = !!(cfg.fields_on && table && N);
+            // the raster under a paint: cfg.raster_dim (0 = not drawn at all,
+            // the agreement reading is the fields alone)
+            const rdim = cfg.raster_dim == null ? 0 : cfg.raster_dim;
+            const rasterOn = cfg.raster !== false && !(fieldsOn && rdim <= 0);
             out.push(new TileLayer({
               id: "cdl-" + (cfg.rgen || 0),
               getTileData: tileFn,
               tileSize: cfg.tile || 256,
               minZoom: cfg.tile_zmin || 3, maxZoom: cfg.tile_zmax || 15,
               extent: cfg.extent || null,
-              // off while the fields draw (a faded field must fade to the basemap),
-              // unless the FIELDS switch is off: then the raw CDL shows under the
-              // painted polygons (where FTW and the CDL disagree)
-              visible: cfg.raster !== false && (!fieldsOn || !!cfg.under),
+              // its own switch: the raster draws under the painted polygons too.
+              // With the raster off it stays up only to carry the outline tiles,
+              // which it does not when a paint is on (the PathLayer has them)
+              // its own switch; under the polygons it is at most a BACKDROP, never
+              // a second reading (Stephen, 2026-08-26, on CDL hues next to the
+              // viridis paint: "perceptually baffling"). With the raster off the
+              // layer stays up only to carry the outline tiles, which it does not
+              // when a paint is on (the PathLayer has them).
+              visible: rasterOn || (cfg.outlines !== false && !fieldsOn),
+              opacity: fieldsOn ? rdim : 1,
               refinementStrategy: "no-overlap",
               beforeId: before(),
               renderSubLayers: sub,
@@ -2307,7 +2468,12 @@ def _(
 ):
     # ---- map cell: builds the map ONCE, empty; must never re-run --------------
     deck = DeckMap(config=json.dumps({
-        "height": 700, "home": dict(HOME), "raster": True, "outlines": True, "under": False,
+        "height": 700, "home": dict(HOME), "raster": True, "outlines": True,
+        # the raster's opacity UNDER the painted polygons. 0: a field paint is a
+        # reading of CDL x AlphaEarth INSIDE the boundaries, so the raster is not
+        # part of it (Stephen, 2026-08-26: "agreement is only fields for this use
+        # case subject to change"). Raise it for a backdrop, 1 for full strength.
+        "raster_dim": 0.0,
         "labels_slot": LABELS_SLOT, "tile": TILE_PX, "extent": EXTENT,
         "tile_zmin": TILE_ZMIN, "tile_zmax": TILE_ZMAX,
         "fields_on": False, "rgen": 0, "fgen": 0, "debug": True,
@@ -2347,6 +2513,7 @@ def _(
     VIEW_W,
     YEAR0,
     YEARS,
+    aef_best,
     asyncio,
     bbox4326,
     blank_png,
@@ -2376,10 +2543,12 @@ def _(
     view_to_bbox,
 ):
     # ---- wiring cell: re-runs on every HUD commit; the map cell never re-runs.
-    # The FIELDS switch (one, on by default): below camera FIELD_ZOOM the raw
-    # CDL (crops-only optional); from it, on = the raster clipped to P(field)
-    # + the outlines, or the painted polygons over the basemap; off = the raw
-    # CDL, under the polygons too (where FTW and the CDL disagree).
+    # THREE INDEPENDENT LAYERS: the CDL raster (its switch, crops-only its
+    # modifier, on by default), the painted polygons (the paint buttons, none
+    # selected = none, and under a paint the raster is not drawn: cfg
+    # raster_dim), the field outlines (its own switch, from the field tier).
+    # The fields come on at _field_floor(): FIELD_ZOOM, or higher on a canvas
+    # big enough that the padded box would blow FIELD_MAX_KM2 there.
     # The HUD's acts happen IN the run (state, recolor, search); the camera and
     # the pick arrive as widget traits and are handled by observers (re-bound
     # every run); the field serve is an asyncio task on the kernel loop (the
@@ -2397,9 +2566,16 @@ def _(
     if _paint not in ("cdl", "agreement", "viridis", "suggests"):
         _paint = None
     _raster = bool(_c.get("raster", True))
-    _crops = bool(_c.get("crops", False))
-    _fields = bool(_c.get("fields", True))   # the one switch: clip + outlines, and no raster under the polygons
-    _clip = _outlines = _fields
+    _crops = bool(_c.get("crops", True))
+    # THREE INDEPENDENT LAYERS (Stephen, 2026-08-26: "should be able to disable
+    # all layers"): the CDL raster (its own switch, crops-only its modifier),
+    # the painted polygons (the paint buttons: none selected = no polygons),
+    # the field outlines (this switch). The raster's CLIP to P(field) is retired
+    # with the old one-switch design (the CDL paint draws the same picture as
+    # polygons, and the raster is "a separate product", his words); _clip is
+    # still threaded through the serve, so it is one line to bring back.
+    _outlines = bool(_c.get("outlines", _c.get("fields", True)))
+    _clip = False
     _inv = bool(_c.get("inv", False))
     _sel = tuple(sorted(int(v) for v in (_c.get("sel") or [])))
     _fyear = _year if _year in FTW_YEARS else FTW_YEARS[0]
@@ -2499,11 +2675,11 @@ def _(
         maj, alt, agree, kept, scored = ft["maj"], ft["alt"], ft["agree"], ft["kept"], ft["scored"]
         parts = []
         for code in st["sel"]:
-            m = kept & ((alt == code) & scored & (agree < 0.5) if st["paint"] == "suggests" else (maj == code))
+            m = kept & ((aef_best(ft) == code) if st["paint"] == "suggests" else (maj == code))
             if not m.any():
                 continue
             a = agree[m & scored]
-            s = f"<b>{cname(code)}</b>: {int(m.sum()):,} fields"
+            s = f"<b>{cname(code) if code >= 0 else 'no suggestion'}</b>: {int(m.sum()):,} fields"
             if len(a):
                 s += f", agreement p50 {np.median(a):.2f}, {(a < 0.5).mean() * 100:.0f}% below 0.5"
             parts.append(s)
@@ -2537,7 +2713,11 @@ def _(
             pass
 
     # ---- the CDL raster: one batch per view, PNGs cached by the raster state
-    _rstate = (_year, _raster, _crops, _clip, _sel, _outlines)
+    # the raster tiles carry the outlines only when the polygons are NOT up
+    # (with a paint on, the polygon layer's PathLayer draws them): as part of
+    # the raster state, toggling the outlines under a paint costs no refetch
+    _rings_on = _outlines and _paint is None
+    _rstate = (_year, _raster, _crops, _clip, _sel, _rings_on)
     _tiles = HOLD["tiles"]
 
     def _rings_for(fyear, W, S, E, N, z):
@@ -2549,7 +2729,7 @@ def _(
     def _serve_batch(z, state, keys):
         """ONE batch: the whole view's raster tiles at zoom z (worker thread)."""
         t0 = time.time()
-        year, raster, crops, clip, sel, outlines = state
+        year, raster, crops, clip, sel, rings_on = state
         fyear = year if year in FTW_YEARS else FTW_YEARS[0]
         boxes = [tile_box(z, x, y) for (_st, _z, x, y) in keys]
         W, S, E, N = (min(b[0] for b in boxes), min(b[1] for b in boxes),
@@ -2557,7 +2737,7 @@ def _(
         # the fields switch works from the field tier only: below it the raw CDL
         # (crops-only optional), "otherwise we see all of CDL unless crops are masked"
         tier = z >= FIELD_TILE_Z
-        rings = _rings_for(fyear, W, S, E, N, z) if (outlines and tier) else None
+        rings = _rings_for(fyear, W, S, E, N, z) if (rings_on and tier) else None
         clip = clip and tier
         counts = np.zeros(256, dtype=np.int64)
         pngs = []
@@ -2571,7 +2751,7 @@ def _(
         tot = max(1, int(counts.sum()))
         legend = [{"code": int(c), "name": cname(c), "hex": CLASSES[int(c)][1], "pct": round(100 * counts[c] / tot, 1), "p50": "", "note": ""}
                   for c in np.argsort(-counts)[:24] if counts[c] > 0 and int(c) in CLASSES]
-        what = ("CDL raster" if raster else "nothing on") + (" · crops only" if crops else "") + (" · fields" if clip else (" · no fields" if tier else ""))
+        what = ("CDL raster" if raster else "no raster") + (" · crops only" if crops else "") + (" · outlines" if rings is not None else "")
         line = f"z{z} · {len(keys)} tiles · year {year} · {what} · {int((time.time() - t0) * 1000)} ms"
         for key, png in zip(keys, pngs):
             _tiles[key] = png
@@ -2652,6 +2832,21 @@ def _(
 
     deck.tile_fn = _tile_fn
 
+    def _field_floor(vsd):
+        """The camera zoom the fields can ACTUALLY come on at: FIELD_ZOOM, or
+        higher when the canvas is big enough that the padded box would blow
+        FIELD_MAX_KM2 there (the box quarters per zoom step). Two knobs used to
+        disagree: at FIELD_ZOOM 11 a 1400x700 canvas is 1,170 km2 (under the
+        1,500 cap) but a fullscreen 2000x1000 is 2,380 and 2560x1300 is 3,970,
+        so a paint sat lit with nothing drawn and the fields looked like they
+        unselected themselves (Stephen, 2026-08-26: "layers get uneselected ...
+        for no noticable reason"). One rule, one message."""
+        km2 = box_km2(pad_box(view_to_bbox(vsd)))
+        if km2 <= 0:
+            return FIELD_ZOOM
+        need = vsd["zoom"] + 0.5 * math.log2(km2 / FIELD_MAX_KM2)
+        return max(FIELD_ZOOM, math.ceil(need * 10) / 10)
+
     def _raster_line():
         """The raster tier's status: the last batch line of the current raster
         state (composed at display time; the cached line carries no note) plus
@@ -2661,15 +2856,17 @@ def _(
             f"year {st['year']} · " + ("CDL raster" if st["raster"] else "nothing on") + " · loading …")
         if st["paint"] is None:
             return line + " · pick a field paint"
-        if _vsd(HOLD.get("vs"))["zoom"] < FIELD_ZOOM:
-            return line + f" · fields from camera z{FIELD_ZOOM:g} (zoom in)"
+        _v = _vsd(HOLD.get("vs"))
+        _fl = _field_floor(_v)
+        if _v["zoom"] < _fl:
+            return line + f" · fields from camera z{_fl:.1f} (zoom in)"
         return line
 
     def _raster_changed():
         HOLD["rstate"] = _rstate
         HOLD["batch"] = None
         HOLD["rgen"] += 1
-        _cfg(raster=_raster, outlines=_outlines, under=not _outlines, rgen=HOLD["rgen"])
+        _cfg(raster=_raster, outlines=_outlines, rgen=HOLD["rgen"])
 
     # ---- the fields: the table over the padded view, the polygons for it -----
     def _fields_off(msg=None):
@@ -2708,18 +2905,22 @@ def _(
         st = HOLD["st"]
         vsd = _vsd(vs)
         z = vsd["zoom"]
-        if st["paint"] is None or z < FIELD_ZOOM:
+        if st["paint"] is None:
             _fields_off()
             return
         view = view_to_bbox(vsd)
         box = pad_box(view)
-        if box_km2(box) > FIELD_MAX_KM2:
-            _fields_off(f"zoom {z:.1f} · view is {box_km2(box):,.0f} km² (> {FIELD_MAX_KM2:g}); zoom in for the fields")
+        floor = _field_floor(vsd)
+        if z < floor:
+            msg = f"zoom {z:.1f} · fields from camera z{floor:.1f} (zoom in)"
+            if floor > FIELD_ZOOM:
+                msg += f" · {box_km2(box):,.0f} km² in view here, the fold caps at {FIELD_MAX_KM2:g}"
+            _fields_off(msg)
             return
         if (not force and HOLD["ft"] is not None and HOLD["box"] is not None
                 and contains(HOLD["box"], view) and HOLD["ft"]["year"] == st["year"]):
             if not _cfg_get("fields_on"):
-                _cfg(fields_on=True, outlines=st["outlines"], under=not st["outlines"])
+                _cfg(fields_on=True, outlines=st["outlines"])
                 _recolor()
                 _say(HOLD.get("last_status", ""))
             return
@@ -2743,7 +2944,7 @@ def _(
         deck.colors = b""
         deck.lines = lipc
         deck.fields = ipc
-        _cfg(fields_on=True, outlines=st["outlines"], under=not st["outlines"], fgen=HOLD["fgen"])
+        _cfg(fields_on=True, outlines=st["outlines"], fgen=HOLD["fgen"])
         try:
             hud.widget.legend = json.dumps(legend_for(ft, st["paint"], st["inv"]))
         except Exception:
@@ -2821,7 +3022,8 @@ def _(
         if lon is None or lat is None:
             return
         if ft is None or not _cfg_get("fields_on"):
-            _say(f"no fields on at {lat:.4f}, {lon:.4f}: pick a field paint and zoom in (camera z{FIELD_ZOOM:g})")
+            _say(f"no fields on at {lat:.4f}, {lon:.4f}: pick a field paint and zoom in "
+                 f"(camera z{_field_floor(_vsd(HOLD.get('vs'))):.1f})")
             return
         if int(p.get("gen", -1)) != HOLD["fgen"]:
             return   # a click on the previous table
@@ -2891,7 +3093,8 @@ def _(
     if _act == "analyze":
         ft = HOLD["ft"]
         _set_panel(_analyze_html(ft) if ft is not None and _paint is not None and _cfg_get("fields_on")
-                   else f"<span style='opacity:.7'>no fields in view (pick a field paint and zoom in, camera z{FIELD_ZOOM:g})</span>")
+                   else f"<span style='opacity:.7'>no fields in view (pick a field paint and zoom in, "
+                        f"camera z{_field_floor(_vsd(HOLD.get('vs'))):.1f})</span>")
     if _act == "search" and _q:
         _say(f"searching: {_q}")
         HOLD["stask"] = _spawn(_search(_q))
@@ -2921,7 +3124,7 @@ def _(
                 _recolor()
                 _set_panel(_panel(HOLD["ft"]))
             if _was["outlines"] != _outlines:
-                _cfg(outlines=_outlines, under=not _outlines)
+                _cfg(outlines=_outlines)
     return
 
 
