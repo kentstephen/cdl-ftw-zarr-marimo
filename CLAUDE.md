@@ -353,13 +353,28 @@ hold the full history; a copy of the FTW notes is in `docs/`.
 - The expand arrow is a WHITE button (white fill, dark glyph, thin dark border
   and a soft halo, full opacity), matching the Carto info control under it;
   the earlier dark-fill/white-glyph version was "hard to see" on the map.
-- OPEN, his words, no direction chosen: "the crops only button is confusing".
-  Two readings were put to him and he did not pick: (1) it reads as a LAYER
-  sitting between "CDL raster" and "field outlines" when it is only a modifier
-  of the raster (the polygons are crop fields already), so nest and rename it;
-  (2) on Dark Matter it punches the non-crop classes to transparent, so
-  pasture, water and developed read as MISSING DATA rather than "not a crop",
-  so draw them as one muted tone instead. Do not guess: ask.
+- CROPS ONLY BELONGS TO THE RASTER (Stephen, 2026-08-26: "a feature like color
+  by disagreement agreement where crops only disapears when the raster is not
+  being used ... its a conditional only when color by agreement is selected is
+  highlight disagreement available"). Reading (1) of "the crops only button is
+  confusing" answered: it is a MODIFIER of the raster, not a layer, so it exists
+  only while the raster is on screen, exactly as highlight disagreement exists
+  only under color by agreement. The strip cannot know that by itself (whether
+  the polygons are up depends on the camera against `_field_floor`), so the
+  KERNEL says: `_sync_crops(cfg)` sets the HUD trait `rasteron` =
+  `cfg.raster and not (cfg.fields_on and cfg.raster_dim <= 0)`, called from
+  every `_cfg(...)` write and once more at the end of the wiring run; the JS
+  `styleCrops()` (a `change:rasteron` observer) shows or hides `cropLab`.
+  Hidden, not greyed, and the checkbox KEEPS its value for its return (unlike
+  `inv`, which unchecks: crops-only is a persistent modifier, not a carry-over).
+  So: raster switch off, or a field paint drawing polygons at raster_dim 0 ->
+  gone; below the field floor with a paint lit the raster IS the picture, so it
+  stays. It matches the serve: with `raster` False `_serve_batch` draws rings or
+  a blank and `crops` reaches nothing.
+- STILL OPEN on that button, reading (2), no direction chosen: on Dark Matter it
+  punches the non-crop classes to transparent, so pasture, water and developed
+  read as MISSING DATA rather than "not a crop"; drawing them as one muted tone
+  was offered. Do not guess: ask.
 - NOT VERIFIED IN A BROWSER (the whole 2026-08-26 set above: the suggests
   paint, the silver outlines, DP simplify, the three independent layers, the
   raster_dim rule, collapse/expand, `_field_floor`, crops-only default). What

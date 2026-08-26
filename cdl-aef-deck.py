@@ -1810,6 +1810,11 @@ def _(anywidget, traitlets):
         status = traitlets.Unicode("").tag(sync=True)
         legend = traitlets.Unicode("").tag(sync=True)
         panel = traitlets.Unicode("").tag(sync=True)
+        # is the CDL raster actually DRAWN right now (its switch on, and not
+        # hidden under a field paint)? "crops only" is a modifier of that
+        # raster and nothing else, so it exists only while this is true, the
+        # way highlight disagreement exists only under color by agreement.
+        rasteron = traitlets.Bool(True).tag(sync=True)
 
         _esm = r"""
         function render({ model, el }) {
@@ -1872,6 +1877,16 @@ def _(anywidget, traitlets):
           const [cropLab] = mkChk("crops only", "raster: drop the non-crop classes", crops, (v) => { crops = v; send("set"); });
           const [fldLab] = mkChk("field outlines", "the Fields of the World boundaries as silver lines (from camera z11); independent of the raster and of the paint", outlinesOn, (v) => { outlinesOn = v; send("set"); });
           rasterBox.append(rasLab, cropLab, fldLab);
+          // crops only MODIFIES THE RASTER, so it is there only while the
+          // raster is on screen: gone with the switch off, and gone under a
+          // field paint (the paint is the fields alone, raster_dim 0), the
+          // same rule as highlight disagreement under color by agreement.
+          // Hidden, not greyed; the checkbox keeps its value for its return.
+          const styleCrops = () => {
+            cropLab.style.display = model.get("rasteron") === false ? "none" : "inline-flex";
+          };
+          model.on("change:rasteron", styleCrops);
+          styleCrops();
           const paintBox = document.createElement("span");
           paintBox.style.cssText = "display:inline-flex;gap:.3rem;align-items:center";
           const pl = document.createElement("span");
@@ -2614,10 +2629,27 @@ def _(
         except Exception:
             pass
 
+    def _sync_crops(c):
+        """Tell the strip whether the CDL raster is on screen, so "crops only"
+        (its modifier and nothing else) can go with it: the switch off, or a
+        field paint drawing the polygons with raster_dim 0 (the raster not drawn
+        at all). Stephen, 2026-08-26, the same shape as highlight disagreement
+        belonging to color by agreement."""
+        try:
+            dim = float(c.get("raster_dim") or 0)
+        except (TypeError, ValueError):
+            dim = 0.0
+        drawn = bool(c.get("raster", True)) and not (bool(c.get("fields_on")) and dim <= 0)
+        try:
+            hud.widget.rasteron = drawn
+        except Exception:
+            pass
+
     def _cfg(**kw):
         c = json.loads(deck.config or "{}")
         c.update(kw)
         deck.config = json.dumps(c)
+        _sync_crops(c)
 
     def _cfg_get(k, default=None):
         try:
@@ -3140,6 +3172,7 @@ def _(
                 _set_panel(_panel(HOLD["ft"]))
             if _was["outlines"] != _outlines:
                 _cfg(outlines=_outlines)
+    _sync_crops(json.loads(deck.config or "{}"))
     return
 
 
